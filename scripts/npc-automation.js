@@ -77,9 +77,9 @@ Object.assign(globalThis.AICompanion, {
       }
     }
 
-    // Track simulated cooldowns for recharge / per-day abilities
+    // Track simulated cooldowns for recharge / per-day abilities (in-memory, not registered setting)
     const cdKey = `npcCD_${actor.id}`;
-    const cooldowns = game.settings.get(MODULE_ID, cdKey) || {};
+    const cooldowns = AICompanion._npcCooldowns?.[cdKey] || {};
 
     return {
       actor, tokenDoc, kb, enemies, allies, hpPct, items,
@@ -322,8 +322,9 @@ Object.assign(globalThis.AICompanion, {
     const cdKey = state.cdKey;
     const cooldowns = { ...state.cooldowns };
     if (/@{recharge}|recharge/i.test(ability.name)) {
-      cooldowns[ability.name] = game.combat.round + 1; // mark used this round
-      game.settings.set(MODULE_ID, cdKey, cooldowns);
+      cooldowns[ability.name] = game.combat.round + 1;
+      if (!AICompanion._npcCooldowns) AICompanion._npcCooldowns = {};
+      AICompanion._npcCooldowns[cdKey] = cooldowns;
     }
     await this._aiChat(`🔥 **${actor.name}** uses **${ability.name}**!\n> ${ability.desc}`, { speaker: ChatMessage.getSpeaker({ actor }) });
   },
