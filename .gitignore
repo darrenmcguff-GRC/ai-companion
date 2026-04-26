@@ -1,0 +1,5 @@
+# Foundry VTT module build artifacts
+*.zip
+node_modules/
+.DS_Store
+.vscode/

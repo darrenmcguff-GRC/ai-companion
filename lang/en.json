@@ -1,0 +1,10 @@
+{
+  "AI-COMPANION.Title": "AI Companion",
+  "AI-COMPANION.Button": "Open AI Companion",
+  "AI-COMPANION.Description": "An embedded AI game-master agent for D&D 5e.",
+  "AI-COMPANION.SettingAutoPilot": "NPC Autopilot",
+  "AI-COMPANION.SettingGMAssist": "GM Assist (Chat Scan)",
+  "AI-COMPANION.SettingPlayerAssist": "Player Assist",
+  "AI-COMPANION.SettingStrict": "GM Assist Strict Mode",
+  "AI-COMPANION.SettingProxy": "Enable AI Proxy"
+}

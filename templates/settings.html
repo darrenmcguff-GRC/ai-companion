@@ -1,0 +1,63 @@
+<form class="flexcol">
+  <div class="form-group">
+    <label>Enable AI Proxy</label>
+    <input type="checkbox" name="apiEnabled" {{#if apiEnabled}}checked{{/if}}>
+    <p class="notes">Connect to external LLM for smarter dialogue and reasoning.</p>
+  </div>
+  <div class="form-group">
+    <label>AI Proxy URL</label>
+    <input type="text" name="apiEndpoint" value="{{apiEndpoint}}" placeholder="http://localhost:3000/api/chat">
+  </div>
+  <div class="form-group">
+    <label>API Key</label>
+    <input type="password" name="apiKey" value="{{apiKey}}" placeholder="sk-...">
+  </div>
+  <div class="form-group">
+    <label>LLM Model</label>
+    <input type="text" name="apiModel" value="{{apiModel}}" placeholder="gpt-4o-mini">
+  </div>
+  <hr>
+  <div class="form-group">
+    <label>NPC Autopilot</label>
+    <input type="checkbox" name="npcAutopilot" {{#if npcAutopilot}}checked{{/if}}>
+    <p class="notes">AI automatically plays NPC turns in combat.</p>
+  </div>
+  <div class="form-group">
+    <label>GM Assist (Chat Scan)</label>
+    <input type="checkbox" name="gmAssist" {{#if gmAssist}}checked{{/if}}>
+    <p class="notes">Scan GM chat for condition mentions and auto-apply them.</p>
+  </div>
+  <div class="form-group">
+    <label>GM Assist Strict Mode</label>
+    <input type="checkbox" name="gmAssistStrict" {{#if gmAssistStrict}}checked{{/if}}>
+    <p class="notes">Only apply effects when GM explicitly approves via prompt.</p>
+  </div>
+  <div class="form-group">
+    <label>Player Assist</label>
+    <input type="checkbox" name="playerAssist" {{#if playerAssist}}checked{{/if}}>
+  </div>
+  <div class="form-group">
+    <label>Auto-Advance Combat</label>
+    <input type="checkbox" name="autoAdvance" {{#if autoAdvance}}checked{{/if}}>
+    <p class="notes">Automatically end NPC turn and advance after autopilot action.</p>
+  </div>
+  <hr>
+  <div class="form-group">
+    <label>AI Persona Name</label>
+    <input type="text" name="aiName" value="{{aiName}}">
+  </div>
+  <div class="form-group">
+    <label>AI Avatar</label>
+    <input type="text" name="aiAvatar" value="{{aiAvatar}}" placeholder="path/to/icon.svg">
+  </div>
+  <hr>
+  <div class="form-group">
+    <label>Auto Loot Suggestions</label>
+    <input type="checkbox" name="autoLoot" {{#if autoLoot}}checked{{/if}}>
+  </div>
+  <div class="form-group">
+    <label>Loot Table UUID</label>
+    <input type="text" name="lootTable" value="{{lootTable}}" placeholder="RollTable UUID">
+    <p class="notes">UUID of a RollTable to draw random loot from after combat.</p>
+  </div>
+</form>

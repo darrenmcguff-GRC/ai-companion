@@ -1,0 +1,38 @@
+{
+  "id": "ai-companion",
+  "title": "AI Companion v2.2",
+  "description": "AI-GM companion for Foundry VTT v2.2 — Fixed NPC Autopilot (targets PCs, detects its own turn), redesigned Autopilot panel with live token info.",
+  "version": "2.2.0",
+  "authors": [
+    {
+      "name": "Steve",
+      "flags": {}
+    }
+  ],
+  "compatibility": {
+    "minimum": "11",
+    "verified": "14",
+    "maximum": "14"
+  },
+  "esmodules": [
+    "scripts/effect-library.js",
+    "scripts/main.js",
+    "scripts/npc-automation.js",
+    "scripts/gm-assist.js"
+  ],
+  "styles": [
+    "styles/ai-companion.css"
+  ],
+  "languages": [
+    {
+      "lang": "en",
+      "name": "English",
+      "path": "lang/en.json"
+    }
+  ],
+  "manifest": "https://shaggy-rice-clap.loca.lt/module.json",
+  "download": "https://shaggy-rice-clap.loca.lt/ai-companion.zip",
+  "url": "https://shaggy-rice-clap.loca.lt",
+  "readme": "https://shaggy-rice-clap.loca.lt/README.md",
+  "bugs": ""
+}
