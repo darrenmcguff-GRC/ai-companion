@@ -120,13 +120,14 @@ class NpcAutopilot {
   static async takeTurn(actor, tokenDoc) {
     if(this._busy)return; this._busy=true;
     try{
-      const enemyTokens=this._findEnemyTokens(tokenDoc);
+      let enemyTokens=this._findEnemyTokens(tokenDoc);
       const allyTokens =this._findAllyTokens(tokenDoc);
       const hpPct=this._getHPPct(actor);
-      this._log(`${actor.name} turn — ${enemyTokens.length} PCs, ${allyTokens.length} allies, HP ${Math.round(hpPct*100)}%`);
+      this._log(`${actor.name} turn start — ${enemyTokens.length} PCs, ${allyTokens.length} allies, HP ${Math.round(hpPct*100)}%`);
 
       // Determine target and best weapon BEFORE movement so we move to correct range
       let targetToken = enemyTokens.length ? this._pickTarget(enemyTokens) : null;
+      this._log(`initial target: ${targetToken?.name||'none'} (${enemyTokens.length} enemies)`);
 
       // ── Move ──
       if(game.settings.get(MODULE_ID,'npcMovement') && tokenDoc && targetToken){
@@ -145,6 +146,7 @@ class NpcAutopilot {
       if(refreshed) tokenDoc = refreshed.document || refreshed;
       enemyTokens=this._findEnemyTokens(tokenDoc);
       targetToken = enemyTokens.length ? this._pickTarget(enemyTokens) : null;
+      this._log(`post-move target: ${targetToken?.name||'none'} (${enemyTokens.length} enemies)`);
 
       // ── Full action economy ──
       await this._executeFullTurn(actor, tokenDoc, enemyTokens, allyTokens, hpPct, targetToken);
@@ -162,26 +164,36 @@ class NpcAutopilot {
      FULL TURN — heals, attacks (multiattack, all weapons), dodge
      ═══════════════════════════════════════════════════════════════════ */
   static async _executeFullTurn(actor, tokenDoc, enemyTokens, allyTokens, hpPct, targetToken) {
+    this._log(`_executeFullTurn: ${actor.name} — ${enemyTokens.length} enemies, HP ${Math.round(hpPct*100)}%, target=${targetToken?.name||'none'}`);
     const items = actor.items?.contents || [];
 
     // ── Bonus Action: heal self if critical ──
     if(hpPct<0.3){
       const baHeal=this._findSpell(actor,/(healing word|mass healing word|cure wounds)/i);
+      this._log(`heal check: ${baHeal ? baHeal.name : 'none found'}`);
       if(baHeal){ await this._useItem(actor,baHeal,actor,tokenDoc); await this._wait(600); }
     }
 
     // ── Action: multiattack or best single attack ──
     const didMulti=await this._doMultiattack(actor, enemyTokens, items, tokenDoc);
+    this._log(`multiattack returned: ${didMulti}`);
 
     if(!didMulti && targetToken){
       const dist = this._tokenDistanceFt(tokenDoc, targetToken);
       const weapon = this._bestWeaponForRange(actor, dist);
+      this._log(`single attack: dist ${Math.round(dist)}ft, weapon=${weapon?.name||'none'}, range=${weapon ? this._getWeaponRange(weapon) : 'n/a'}`);
       if(weapon && dist <= this._getWeaponRange(weapon) + 3){
         await this._npcAttack(actor, weapon, targetToken, tokenDoc);
         await this._wait(600);
       } else if(weapon) {
         await this._say(`⚠️ ${actor.name} is ${Math.round(dist)} ft from ${targetToken.name}, beyond ${weapon.name}'s ${this._getWeaponRange(weapon)} ft reach.`, actor, {whisper:true});
+      } else {
+        await this._say(`⚠️ ${actor.name} has no usable weapon.`, actor, {whisper:true});
       }
+    } else if(!didMulti && !targetToken) {
+      this._log(`no multiattack and no target token — skipping attack`);
+    } else {
+      this._log(`multiattack succeeded; skipping single attack`);
     }
 
     // ── Bonus Action: off-hand if applicable ──
@@ -189,6 +201,7 @@ class NpcAutopilot {
       const dist = this._tokenDistanceFt(tokenDoc, targetToken);
       const offHand = this._bestWeaponForRange(actor, dist, {excludeMain:true});
       const mainWeapon = this._bestWeaponForRange(actor, dist);
+      this._log(`off-hand check: offHand=${offHand?.name||'none'}, main=${mainWeapon?.name||'none'}`);
       if(offHand && offHand.id !== mainWeapon?.id && dist <= this._getWeaponRange(offHand) + 3){
         await this._npcAttack(actor, offHand, targetToken, tokenDoc);
         await this._wait(600);
@@ -268,7 +281,7 @@ class NpcAutopilot {
   static _wordToNum(w){ const map={one:1,two:2,three:3,four:4,five:5}; const n=parseInt(w); return isNaN(n)?(map[w?.toLowerCase()]||1):n; }
 
   /* ═══════════════════════════════════════════════════════════════════
-     ATTACK / USE ITEM — standalone automation with optional Midi-QOL
+     ATTACK / USE ITEM — per-attempt fallback chain with full logging
      ═══════════════════════════════════════════════════════════════════ */
   static async _npcAttack(actor, item, targetToken, selfToken) {
     if(!item){ await this._say(`⚠️ ${actor.name} has no weapon.`, actor, {whisper:true}); return; }
@@ -276,152 +289,220 @@ class NpcAutopilot {
 
     const dist = this._tokenDistanceFt(selfToken, targetToken);
     const range = this._getWeaponRange(item);
+    this._log(`${actor.name} → ${targetToken.name} (${Math.round(dist)}ft, range ${range}ft, item "${item.name}")`);
+
     if(dist > range + 3){
       await this._say(`⚠️ ${actor.name} is ${Math.round(dist)} ft from ${targetToken.name} — ${item.name} only reaches ${range} ft.`, actor, {whisper:true});
       return;
     }
 
-    // Save current GM selection/target state
-    const oldTargetIds = Array.from(game.user.targets).map(t=>t.id);
-    const oldControlledIds = Array.from(canvas.tokens.controlled).map(t=>t.id);
+    // Save current GM state
+    const oldTargets = Array.from(game.user.targets).map(t=>t.id);
+    const oldControlled = Array.from(canvas.tokens.controlled).map(t=>t.id);
 
     try{
-      // Target the defender + select attacker for dnd5e context
-      const tgtP = targetToken.object || targetToken;
-      if(tgtP.setTarget) tgtP.setTarget(true, {user: game.user, releaseOthers: true});
-      const selfP = selfToken?.object || selfToken;
-      if(selfP?.control) selfP.control({releaseOthers: true});
+      // ── Set canvas target & selection for dnd5e context ──
+      const tgt = targetToken.object || targetToken;
+      const self = selfToken?.object || selfToken;
+      if(tgt?.setTarget) tgt.setTarget(true, {user: game.user, releaseOthers: true});
+      if(self?.control) self.control({releaseOthers: true});
+      await this._wait(50); // brief moment for canvas to register target
 
-      // ═════ Midi-QOL integration ═════
-      const hasMidiQOL = game.modules.get("midi-qol")?.active && globalThis.MidiQOL?.Workflow;
-      if(hasMidiQOL){
-        const activityM = this._attackActivity(item) || this._firstActivity(item);
-        if(activityM && typeof activityM.use === 'function'){
-          await activityM.use({
-            configureDialog: false,
-            createMessage: true,
-            midiOptions: {
-              workflowOptions: {
-                autoRollAttack: true,
-                autoRollDamage: "onHit",
-                fastForwardAttack: true,
-                fastForwardDamage: true,
-                targetConfirmation: "none"
+      let executed = false;
+
+      // ═════ PATH 1: Midi-QOL (if installed) ═════
+      if(!executed && game.modules.get("midi-qol")?.active && globalThis.MidiQOL?.Workflow){
+        const act = this._attackActivity(item) || this._firstActivity(item);
+        if(act && typeof act.use === 'function'){
+          this._log(`→ PATH 1: Midi-QOL activity.use() for ${item.name}`);
+          try{
+            await act.use({
+              configureDialog: false,
+              createMessage: true,
+              midiOptions: {
+                workflowOptions: {
+                  autoRollAttack: true,
+                  autoRollDamage: "onHit",
+                  fastForwardAttack: true,
+                  fastForwardDamage: true,
+                  targetConfirmation: "none"
+                }
+              }
+            });
+            this._log(`✓ PATH 1 succeeded`);
+            executed = true;
+          }catch(e1){ this._log(`✗ PATH 1 (Midi-QOL) failed: ${e1.message}`); }
+        }
+      }
+
+      // ═════ PATH 2: dnd5e v4 activity.use() — native ═════
+      if(!executed){
+        const activity = this._attackActivity(item);
+        if(activity && typeof activity.use === 'function'){
+          this._log(`→ PATH 2: dnd5e v4 activity.use() type=${activity.type||'?'} name=${activity.name||'?'}`);
+          try{
+            // v4 canonical: usageConfig, dialogConfig, messageConfig
+            // DO NOT pass target UUIDs in the usage — dnd5e v4 reads targets from canvas.user.targets
+            await activity.use(
+              { consume: false },
+              { configure: false },
+              { create: true }
+            );
+            this._log(`✓ PATH 2 (v4 canonical) succeeded`);
+            executed = true;
+          }catch(e2){
+            this._log(`✗ PATH 2a failed: ${e2.message}`);
+            // v4 alternate: flattened single-object config (some point releases)
+            try{
+              await activity.use({
+                configureDialog: false,
+                createMessage: true,
+                consume: false
+              });
+              this._log(`✓ PATH 2b (flat config) succeeded`);
+              executed = true;
+            }catch(e3){ this._log(`✗ PATH 2b failed: ${e3.message}`); }
+          }
+        } else {
+          this._log(`→ No valid activity found for ${item.name}; skipping PATH 2`);
+        }
+      }
+
+      // ═════ PATH 3: dnd5e legacy item.use() ═════
+      if(!executed && typeof item.use === 'function'){
+        this._log(`→ PATH 3: legacy item.use() for ${item.name}`);
+        try{
+          await item.use({configure:false, createMessage:true});
+          this._log(`✓ PATH 3 succeeded`);
+          executed = true;
+        }catch(e4){ this._log(`✗ PATH 3 failed: ${e4.message}`); }
+      }
+
+      // ═════ PATH 4: dnd5e legacy item.rollAttack() / rollDamage() ═════
+      if(!executed && typeof item.rollAttack === 'function'){
+        this._log(`→ PATH 4: legacy item.rollAttack() for ${item.name}`);
+        try{
+          const atk = await item.rollAttack({event: null, fastForward: true});
+          if(!atk || atk.total === undefined){
+            await this._say(`❌ ${actor.name} attacks ${targetToken.name} but the attack roll failed.`, actor);
+          } else {
+            const targetAC = targetToken.actor?.system?.attributes?.ac?.value || 10;
+            if(atk.total < targetAC){
+              await this._say(`❌ ${actor.name} attacks ${targetToken.name} and misses! (Rolled ${atk.total} vs AC ${targetAC})`, actor);
+            } else {
+              await this._say(`💥 ${actor.name} hits ${targetToken.name} with ${item.name}! (Attack roll ${atk.total})`, actor);
+              if(typeof item.rollDamage === 'function'){
+                const dmg = await item.rollDamage({event: null, fastForward: true});
+                if(dmg?.total !== undefined){
+                  const hp = targetToken.actor?.system?.attributes?.hp;
+                  if(hp){ const newHP = Math.max(0, hp.value - dmg.total); await targetToken.actor.update({"system.attributes.hp.value": newHP}); }
+                }
               }
             }
-          });
-          return; // Midi-QOL handles everything
-        }
-      }
-
-      // ═════ Native standalone automation ═════
-      const activity = this._attackActivity(item);
-      if(activity && typeof activity.use === 'function'){
-        // In v4, activity.use({target: [uuid], consume: false}, {configure: false}, {create: true})
-        const usage = { target: [targetToken.document?.uuid || targetToken.uuid], consume: false };
-        await activity.use(usage, { configure: false }, { create: true });
-        return;
-      }
-
-      // v3 fallback — try old item API
-      if(typeof item.rollAttack === 'function'){
-        const atk = await item.rollAttack({event: null, fastForward: true});
-        if(!atk || !atk.total){ await this._say(`❌ ${actor.name} misses ${targetToken.name}!`, actor); return; }
-        const targetAC = targetToken.actor?.system?.attributes?.ac?.value || 10;
-        if(atk.total < targetAC){
-          await this._say(`❌ ${actor.name} attacks ${targetToken.name} and misses! (Rolled ${atk.total} vs AC ${targetAC})`, actor);
-          return;
-        }
-        await this._say(`💥 ${actor.name} hits ${targetToken.name} with ${item.name}! (Attack roll ${atk.total})`, actor);
-        if(typeof item.rollDamage==='function'){
-          const dmg = await item.rollDamage({event: null, fastForward: true});
-          if(dmg?.total){
-            const hp = targetToken.actor?.system?.attributes?.hp;
-            if(hp){ const newHP = Math.max(0, hp.value - dmg.total); await targetToken.actor.update({"system.attributes.hp.value": newHP}); }
           }
-        }
-        return;
-      }
-      if(typeof item.use==='function'){
-        await item.use({configure:false, createMessage:true});
-        return;
+          executed = true;
+        }catch(e5){ this._log(`✗ PATH 4 failed: ${e5.message}`); }
       }
 
-      // MANUAL legacy fallback
-      const bonus=this._getAtkBonus(actor,item);
-      const roll = await new Roll(`1d20+${bonus}`).evaluate();
-      await roll.toMessage({speaker:ChatMessage.getSpeaker({actor}), flavor:`${actor.name} attacks ${targetToken.name} with ${item.name}`});
-    }catch(e){
-      console.warn('[NPC Autopilot] attack error', e);
-      await this._say(`⚠️ ${item.name} failed: ${e.message}`, actor, {whisper:true});
+      // ═════ PATH 5: manual die roll ═════
+      if(!executed){
+        this._log(`→ PATH 5: manual roll fallback for ${item.name}`);
+        try{
+          const bonus = this._getAtkBonus(actor, item);
+          const roll = await new Roll(`1d20 + ${bonus}`).evaluate();
+          await roll.toMessage({
+            speaker: ChatMessage.getSpeaker({actor}),
+            flavor: `${actor.name} attacks ${targetToken.name} with ${item.name}`
+          });
+          this._log(`✓ PATH 5 (manual) succeeded`);
+        }catch(e6){ this._log(`✗ PATH 5 failed: ${e6.message}`); }
+      }
+
+    }catch(err){
+      console.error('[NPC Autopilot] attack fatal error', err);
+      await this._say(`⚠️ ${item.name} fatal error: ${err.message}`, actor, {whisper:true});
     }finally{
       // Restore targets
       if(game.user.updateTokenTargets){
-        game.user.updateTokenTargets(oldTargetIds);
+        game.user.updateTokenTargets(oldTargets);
       } else {
         for(const t of Array.from(game.user.targets)){ const p=t.object||t; if(p.setTarget) p.setTarget(false,{user:game.user}); }
-        for(const id of oldTargetIds){ const to=canvas.tokens.get(id); if(to?.setTarget) to.setTarget(true,{user:game.user}); }
+        for(const id of oldTargets){ const to=canvas.tokens.get(id); if(to?.setTarget) to.setTarget(true,{user:game.user}); }
       }
       // Restore selection
       for(const t of Array.from(canvas.tokens.controlled)){ const p=t.object||t; if(p.release) p.release(); }
-      for(const id of oldControlledIds){ const to=canvas.tokens.get(id); if(to?.control) to.control({releaseOthers:false}); }
+      for(const id of oldControlled){ const to=canvas.tokens.get(id); if(to?.control) to.control({releaseOthers:false}); }
     }
   }
 
   static async _useItem(actor, item, targetToken, selfToken) {
-    if(!item)return;
-    const oldTargetIds = Array.from(game.user.targets).map(t=>t.id);
-    const oldControlledIds = Array.from(canvas.tokens.controlled).map(t=>t.id);
+    if(!item) return;
+    this._log(`_useItem: ${actor.name} → ${item.name}`);
+    const oldTargets = Array.from(game.user.targets).map(t=>t.id);
+    const oldControlled = Array.from(canvas.tokens.controlled).map(t=>t.id);
+
     try{
       if(targetToken){
-        const tgtP=targetToken.object||targetToken;
-        if(tgtP.setTarget) tgtP.setTarget(true,{user:game.user,releaseOthers:true});
+        const tgt=targetToken.object||targetToken;
+        if(tgt.setTarget) tgt.setTarget(true,{user:game.user,releaseOthers:true});
       }
-      const selfP=selfToken?.object||selfToken;
-      if(selfP?.control) selfP.control({releaseOthers:true});
+      const self=selfToken?.object||selfToken;
+      if(self?.control) self.control({releaseOthers:true});
+      await this._wait(50);
 
-      // ═════ Midi-QOL integration for spells/features ═════
-      const hasMidiQOL = game.modules.get("midi-qol")?.active && globalThis.MidiQOL?.Workflow;
-      if(hasMidiQOL){
+      let executed = false;
+
+      // PATH 1: Midi-QOL
+      if(game.modules.get("midi-qol")?.active && globalThis.MidiQOL?.Workflow){
         const activity = this._firstActivity(item);
         if(activity && typeof activity.use === 'function'){
-          await activity.use({
-            configureDialog: false,
-            createMessage: true,
-            midiOptions: {
-              workflowOptions: {
-                autoRollAttack: true,
-                autoRollDamage: "onHit",
-                fastForwardAttack: true,
-                fastForwardDamage: true,
-                targetConfirmation: "none"
-              }
-            }
-          });
-          return;
+          try{
+            await activity.use({ configureDialog: false, createMessage: true });
+            this._log(`_useItem PATH 1 (Midi) ok`);
+            executed = true;
+          }catch(e){ this._log(`_useItem PATH 1 failed: ${e.message}`); }
         }
       }
 
-      // ═════ Native fallback ═════
-      const activityB=this._firstActivity(item);
-      if(activityB&&typeof activityB.use==='function'){
-        // v4 canonical: activity.use(usageConfig, dialogConfig, messageConfig)
-        const usage = { consume: false };
-        if(targetToken) usage.target = [targetToken.document?.uuid || targetToken.uuid];
-        await activityB.use(usage, { configure: false }, { create: true });
-        return;
+      // PATH 2: dnd5e v4 activity.use()
+      if(!executed){
+        const activity=this._firstActivity(item);
+        if(activity && typeof activity.use==='function'){
+          try{
+            await activity.use({consume:false},{configure:false},{create:true});
+            this._log(`_useItem PATH 2 (v4) ok`);
+            executed = true;
+          }catch(e1){
+            this._log(`_useItem PATH 2a failed: ${e1.message}`);
+            try{
+              await activity.use({configureDialog:false,createMessage:true,consume:false});
+              this._log(`_useItem PATH 2b ok`);
+              executed = true;
+            }catch(e2){ this._log(`_useItem PATH 2b failed: ${e2.message}`); }
+          }
+        }
       }
-      if(typeof item.use==='function'){
-        await item.use({configure:false, createMessage:true});
-        return;
+
+      // PATH 3: legacy item.use()
+      if(!executed && typeof item.use==='function'){
+        try{
+          await item.use({configure:false, createMessage:true});
+          this._log(`_useItem PATH 3 (legacy) ok`);
+          executed = true;
+        }catch(e){ this._log(`_useItem PATH 3 failed: ${e.message}`); }
       }
-      await this._say(`🔥 **${actor.name}** uses **${item.name}** on **${targetToken?.name||'target'}**!`, actor);
-    }catch(e){
-      console.warn('[NPC Autopilot] useItem error', e);
+
+      if(!executed){
+        this._log(`_useItem: no path succeeded for ${item.name}`);
+        await this._say(`🔥 **${actor.name}** uses **${item.name}** on **${targetToken?.name||'target'}**!`, actor);
+      }
+
+    }catch(err){
+      console.error('[NPC Autopilot] useItem error', err);
     }finally{
-      if(game.user.updateTokenTargets) game.user.updateTokenTargets(oldTargetIds);
+      if(game.user.updateTokenTargets) game.user.updateTokenTargets(oldTargets);
       for(const t of Array.from(canvas.tokens.controlled)){ const p=t.object||t; if(p.release) p.release(); }
-      for(const id of oldControlledIds){ const to=canvas.tokens.get(id); if(to?.control) to.control({releaseOthers:false}); }
+      for(const id of oldControlled){ const to=canvas.tokens.get(id); if(to?.control) to.control({releaseOthers:false}); }
     }
   }
 
