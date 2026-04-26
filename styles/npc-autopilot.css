@@ -1,0 +1,127 @@
+/* NPC Autopilot — Styles */
+#npc-ap-panel {
+  position: fixed;
+  background: #1e1e2e;
+  border: 1px solid #4a4a6a;
+  border-radius: 8px;
+  box-shadow: 0 8px 32px rgba(0,0,0,0.5);
+  z-index: 9999;
+  display: flex;
+  flex-direction: column;
+  color: #e0e0e0;
+  font-family: 'Signika', sans-serif;
+  min-width: 280px;
+  min-height: 280px;
+}
+
+.npc-ap-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 10px 14px;
+  background: #2d2d44;
+  border-bottom: 1px solid #4a4a6a;
+  border-radius: 8px 8px 0 0;
+  cursor: grab;
+  font-weight: 700;
+  font-size: 15px;
+  color: #c4b5fd;
+}
+.npc-ap-header:active { cursor: grabbing; }
+.npc-ap-actions { display: flex; gap: 10px; }
+.npc-ap-actions i { cursor: pointer; opacity: 0.7; font-size: 13px; }
+.npc-ap-actions i:hover { opacity: 1; color: #fff; }
+
+.npc-ap-scroll { flex: 1; overflow-y: auto; padding: 10px 14px; }
+
+.npc-ap-status-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 10px;
+}
+.npc-ap-toggle {
+  padding: 4px 10px;
+  border-radius: 12px;
+  font-size: 12px;
+  font-weight: 700;
+  cursor: pointer;
+  user-select: none;
+}
+.npc-ap-toggle.on { background: #166534; color: #86efac; }
+.npc-ap-toggle.off { background: #450a0a; color: #fca5a5; }
+.npc-ap-combat-status { font-size: 12px; color: #94a3b8; }
+
+.npc-ap-card {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px;
+  background: #252538;
+  border: 1px solid #3a3a55;
+  border-radius: 6px;
+  margin-bottom: 10px;
+}
+.npc-ap-card > img {
+  width: 40px; height: 40px; border-radius: 4px; object-fit: cover;
+}
+.npc-ap-info { flex: 1; min-width: 0; }
+.npc-ap-name { font-weight: 700; font-size: 14px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.npc-ap-meta { font-size: 11px; color: #94a3b8; }
+.npc-ap-hpbar { height: 6px; background: #1a1a2e; border-radius: 3px; margin-top: 4px; overflow: hidden; }
+.npc-ap-hpbar > div { height: 100%; border-radius: 3px; transition: width 0.3s; }
+.npc-ap-badge { padding: 2px 8px; border-radius: 12px; background: #4c1d95; color: #ddd6fe; font-size: 10px; font-weight: 700; white-space: nowrap; }
+
+.npc-ap-section { font-size: 11px; font-weight: 700; color: #c4b5fd; text-transform: uppercase; margin-bottom: 6px; margin-top: 4px; }
+
+.npc-ap-list { margin-bottom: 8px; }
+
+.npc-ap-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 5px 8px;
+  border-radius: 4px;
+  margin-bottom: 4px;
+  background: #1e1e2e;
+}
+.npc-ap-item.current { background: #312e81; }
+.npc-ap-item > img { width: 28px; height: 28px; border-radius: 3px; object-fit: cover; }
+.npc-ap-item-name { flex: 1; font-size: 12px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.npc-ap-item-hpbar { width: 50px; height: 5px; background: #1a1a2e; border-radius: 2px; overflow: hidden; }
+.npc-ap-item-hpbar > div { height: 100%; border-radius: 2px; }
+.npc-ap-item-hp { font-size: 10px; font-weight: 700; width: 28px; text-align: right; }
+
+.npc-ap-controls { padding: 0 14px 14px; }
+.npc-ap-btn {
+  width: 100%;
+  padding: 8px;
+  border: none;
+  border-radius: 5px;
+  background: #4f46e5;
+  color: #fff;
+  font-weight: 700;
+  font-size: 13px;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+}
+.npc-ap-btn:hover { background: #6366f1; }
+
+.npc-ap-resize {
+  position: absolute;
+  right: 0;
+  bottom: 0;
+  width: 16px;
+  height: 16px;
+  cursor: se-resize;
+  background: linear-gradient(135deg, transparent 50%, #4a4a6a 50%);
+  border-radius: 0 0 7px 0;
+}
+
+/* Scrollbar */
+#npc-ap-panel ::-webkit-scrollbar { width: 6px; }
+#npc-ap-panel ::-webkit-scrollbar-track { background: transparent; }
+#npc-ap-panel ::-webkit-scrollbar-thumb { background: #4a4a6a; border-radius: 3px; }
