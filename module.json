@@ -2,7 +2,7 @@
   "id": "ai-companion",
   "title": "AI Companion v2.2",
   "description": "AI-GM companion for Foundry VTT v2.2 \u2014 Fixed NPC Autopilot (targets PCs, detects its own turn), redesigned Autopilot panel with live token info.",
-  "version": "2.2.0",
+  "version": "2.2.1",
   "authors": [
     {
       "name": "Steve",
