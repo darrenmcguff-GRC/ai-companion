@@ -10,8 +10,8 @@
   flex-direction: column;
   color: #e0e0e0;
   font-family: 'Signika', sans-serif;
-  min-width: 280px;
-  min-height: 280px;
+  min-width: 300px;
+  min-height: 300px;
 }
 
 .npc-ap-header {
@@ -79,14 +79,19 @@
 .npc-ap-item {
   display: flex;
   align-items: center;
-  gap: 8px;
+  gap: 6px;
   padding: 5px 8px;
   border-radius: 4px;
   margin-bottom: 4px;
   background: #1e1e2e;
 }
 .npc-ap-item.current { background: #312e81; }
-.npc-ap-item > img { width: 28px; height: 28px; border-radius: 3px; object-fit: cover; }
+.npc-ap-item .npc-ap-check {
+  width: 16px; height: 16px; margin: 0; cursor: pointer; accent-color: #4f46e5; flex-shrink: 0;
+}
+.npc-ap-item > img {
+  width: 28px; height: 28px; border-radius: 3px; object-fit: cover; flex-shrink: 0;
+}
 .npc-ap-item-name { flex: 1; font-size: 12px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .npc-ap-item-hpbar { width: 50px; height: 5px; background: #1a1a2e; border-radius: 2px; overflow: hidden; }
 .npc-ap-item-hpbar > div { height: 100%; border-radius: 2px; }
