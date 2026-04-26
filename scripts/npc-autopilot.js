@@ -1,9 +1,10 @@
 const MODULE_ID = 'ai-companion';
 
 /* ═══════════════════════════════════════════════════════════════════
-   NPC AUTOPILOT v3.3 — Foundry VTT D&D 5e
+   NPC AUTOPILOT v3.4 — Foundry VTT D&D 5e
    Full-turn automation with per-NPC toggles, proper targeting,
-   range checks, and weapon appropriateness.
+   range checks, weapon appropriateness, native attack/damage rolling,
+   and optional Midi-QOL integration.
    ═══════════════════════════════════════════════════════════════════ */
 
 /* ─── Settings ──────────────────────────────────────────────────── */
@@ -260,7 +261,7 @@ class NpcAutopilot {
   static _wordToNum(w){ const map={one:1,two:2,three:3,four:4,five:5}; const n=parseInt(w); return isNaN(n)?(map[w?.toLowerCase()]||1):n; }
 
   /* ═══════════════════════════════════════════════════════════════════
-     ATTACK / USE ITEM — proper targeting + range validation
+     ATTACK / USE ITEM — standalone automation with optional Midi-QOL
      ═══════════════════════════════════════════════════════════════════ */
   static async _npcAttack(actor, item, targetToken, selfToken) {
     if(!item){ await this._say(`⚠️ ${actor.name} has no weapon.`, actor, {whisper:true}); return; }
@@ -273,28 +274,103 @@ class NpcAutopilot {
       return;
     }
 
+    // Save current GM selection/target state
     const oldTargetIds = Array.from(game.user.targets).map(t=>t.id);
     const oldControlledIds = Array.from(canvas.tokens.controlled).map(t=>t.id);
 
     try{
-      // Target the defender
+      // Target the defender + select attacker for dnd5e context
       const tgtP = targetToken.object || targetToken;
       if(tgtP.setTarget) tgtP.setTarget(true, {user: game.user, releaseOthers: true});
-      // Select the attacker so dnd5e knows who is acting
       const selfP = selfToken?.object || selfToken;
       if(selfP?.control) selfP.control({releaseOthers: true});
 
-      // v4 activity
+      // ═════ Midi-QOL integration ═════
+      const hasMidiQOL = game.modules.get("midi-qol")?.active && globalThis.MidiQOL?.Workflow;
+      if(hasMidiQOL){
+        const activity = this._attackActivity(item) || this._firstActivity(item);
+        if(activity && typeof activity.use === 'function'){
+          await activity.use({
+            configureDialog: false,
+            createMessage: true,
+            midiOptions: {
+              workflowOptions: {
+                autoRollAttack: true,
+                autoRollDamage: "onHit",
+                fastForwardAttack: true,
+                fastForwardDamage: true,
+                targetConfirmation: "none"
+              }
+            }
+          });
+          return; // Midi-QOL handles everything
+        }
+      }
+
+      // ═════ Native standalone automation ═════
       const activity = this._attackActivity(item);
-      if(activity && typeof activity.use==='function'){
-        await activity.use({configure:false, createMessage:true});
+      if(activity && typeof activity.rollAttack === 'function'){
+        // Build usage config
+        const usage = activity.getUsageConfig?.() ?? {};
+        usage.target = [targetToken.document?.uuid || targetToken.uuid];
+
+        // Roll attack
+        let attackRolls;
+        try{
+          const usage = activity.getUsageConfig?.() ?? {};
+          usage.target = [targetToken.document?.uuid || targetToken.uuid];
+          attackRolls = await activity.rollAttack(usage, {}, { configure: false, fastForward: true });
+        }catch(e){ console.warn('[NPC Autopilot] rollAttack error', e); }
+
+        if(!attackRolls?.length){
+          await this._say(`❌ ${actor.name} couldn't roll attack with ${item.name}`, actor, {whisper:true});
+          return;
+        }
+
+        const toHit = attackRolls[0].total;
+        const targetAC = targetToken.actor?.system?.attributes?.ac?.value || 10;
+
+        if(toHit < targetAC){
+          await this._say(`❌ ${actor.name} attacks ${targetToken.name} with ${item.name} and misses! (Rolled ${toHit} vs AC ${targetAC})`, actor);
+          return;
+        }
+
+        // HIT — roll damage
+        await this._say(`💥 ${actor.name} hits ${targetToken.name} with ${item.name}! (Attack roll ${toHit})`, actor);
+
+        let damageRolls;
+        try{
+          damageRolls = await activity.rollDamage(usage, {}, { configure: false, fastForward: true });
+        }catch(e){ console.warn('[NPC Autopilot] rollDamage error', e); }
+
+        if(damageRolls?.length){
+          const totalDamage = damageRolls.reduce((sum, r) => sum + (r.total || 0), 0);
+          const dmgType = activity.damage?.parts?.[0]?.[1] || "slashing";
+
+          // Apply damage to target
+          const targetActor = targetToken.actor;
+          const hp = targetActor?.system?.attributes?.hp;
+          if(hp && totalDamage > 0){
+            const newHP = Math.max(0, hp.value - totalDamage);
+            await targetActor.update({"system.attributes.hp.value": newHP});
+          }
+
+          await this._say(`💥 ${actor.name} deals **${totalDamage}** ${dmgType} damage to ${targetToken.name}!`, actor);
+        }
         return;
       }
-      // v3 item.use()
-      if(typeof item.use==='function'){ await item.use(); return; }
-      // Legacy
-      if(typeof item.rollAttack==='function'){ await item.rollAttack({event:null}); return; }
-      // Manual
+
+      // FALLBACK: v3 item.use() or legacy
+      if(typeof item.use==='function'){
+        await item.use({configure:false, createMessage:true});
+        return;
+      }
+      if(typeof item.rollAttack==='function'){
+        await item.rollAttack({event:null});
+        return;
+      }
+
+      // MANUAL legacy fallback
       const bonus=this._getAtkBonus(actor,item);
       const roll=await new Roll(`1d20+${bonus}`).evaluate();
       await roll.toMessage({speaker:ChatMessage.getSpeaker({actor}), flavor:`${actor.name} attacks ${targetToken.name} with ${item.name}`});
@@ -307,11 +383,11 @@ class NpcAutopilot {
         game.user.updateTokenTargets(oldTargetIds);
       } else {
         for(const t of Array.from(game.user.targets)){ const p=t.object||t; if(p.setTarget) p.setTarget(false,{user:game.user}); }
-        for(const id of oldTargetIds){ const t=canvas.tokens.get(id); if(t?.setTarget) t.setTarget(true,{user:game.user}); }
+        for(const id of oldTargetIds){ const to=canvas.tokens.get(id); if(to?.setTarget) to.setTarget(true,{user:game.user}); }
       }
       // Restore selection
       for(const t of Array.from(canvas.tokens.controlled)){ const p=t.object||t; if(p.release) p.release(); }
-      for(const id of oldControlledIds){ const t=canvas.tokens.get(id); if(t?.control) t.control({releaseOthers:false}); }
+      for(const id of oldControlledIds){ const to=canvas.tokens.get(id); if(to?.control) to.control({releaseOthers:false}); }
     }
   }
 
@@ -327,18 +403,41 @@ class NpcAutopilot {
       const selfP=selfToken?.object||selfToken;
       if(selfP?.control) selfP.control({releaseOthers:true});
 
+      // ═════ Midi-QOL integration for spells/features ═════
+      const hasMidiQOL = game.modules.get("midi-qol")?.active && globalThis.MidiQOL?.Workflow;
+      if(hasMidiQOL){
+        const activity = this._firstActivity(item);
+        if(activity && typeof activity.use === 'function'){
+          await activity.use({
+            configureDialog: false,
+            createMessage: true,
+            midiOptions: {
+              workflowOptions: {
+                autoRollAttack: true,
+                autoRollDamage: "onHit",
+                fastForwardAttack: true,
+                fastForwardDamage: true,
+                targetConfirmation: "none"
+              }
+            }
+          });
+          return;
+        }
+      }
+
+      // ═════ Native fallback ═════
       const activity=this._firstActivity(item);
       if(activity&&typeof activity.use==='function'){
         await activity.use({configure:false, createMessage:true}); return;
       }
-      if(typeof item.use==='function'){ await item.use(); return; }
+      if(typeof item.use==='function'){ await item.use({configure:false, createMessage:true}); return; }
       await this._say(`🔥 **${actor.name}** uses **${item.name}** on **${targetToken?.name||'target'}**!`, actor);
     }catch(e){
       console.warn('[NPC Autopilot] useItem error', e);
     }finally{
       if(game.user.updateTokenTargets) game.user.updateTokenTargets(oldTargetIds);
       for(const t of Array.from(canvas.tokens.controlled)){ const p=t.object||t; if(p.release) p.release(); }
-      for(const id of oldControlledIds){ const t=canvas.tokens.get(id); if(t?.control) t.control({releaseOthers:false}); }
+      for(const id of oldControlledIds){ const to=canvas.tokens.get(id); if(to?.control) to.control({releaseOthers:false}); }
     }
   }
 
