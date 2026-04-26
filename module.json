@@ -1,8 +1,8 @@
 {
   "id": "ai-companion",
-  "title": "NPC Autopilot v3.4",
+  "title": "NPC Autopilot v3.5",
   "description": "Foundry VTT NPC combat autopilot. Full-turn automation with per-NPC toggles.",
-  "version":"3.4.0",
+  "version":"3.5.0",
   "authors": [
     {
       "name": "Steve"

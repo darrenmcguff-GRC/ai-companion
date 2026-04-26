@@ -1,7 +1,7 @@
 const MODULE_ID = 'ai-companion';
 
 /* ═══════════════════════════════════════════════════════════════════
-   NPC AUTOPILOT v3.4 — Foundry VTT D&D 5e
+   NPC AUTOPILOT v3.5 — Foundry VTT D&D 5e
    Full-turn automation with per-NPC toggles, proper targeting,
    range checks, weapon appropriateness, native attack/damage rolling,
    and optional Midi-QOL integration.
@@ -139,7 +139,11 @@ class NpcAutopilot {
         if(move){await this._say(`🏃 ${move}`, actor); await this._wait(400);}
       }
 
-      // ── Re-evaluate target after movement (closest PC) ──
+      // ── Re-evaluate target after movement ──
+      // Refresh tokenDoc from canvas in case coordinates updated
+      const refreshed = canvas.tokens.get(tokenDoc.id);
+      if(refreshed) tokenDoc = refreshed.document || refreshed;
+      enemyTokens=this._findEnemyTokens(tokenDoc);
       targetToken = enemyTokens.length ? this._pickTarget(enemyTokens) : null;
 
       // ── Full action economy ──
@@ -243,6 +247,7 @@ class NpcAutopilot {
 
     if(!attacks.length) return false;
 
+    let attacksPerformed = 0;
     for(const weapon of attacks){
       const target=this._pickTarget(enemyTokens);
       if(!target) continue;
@@ -250,11 +255,13 @@ class NpcAutopilot {
       const range=this._getWeaponRange(weapon);
       if(dist <= range + 3){
         await this._npcAttack(actor, weapon, target, selfToken);
+        attacksPerformed++;
         await this._wait(700);
       } else {
         await this._say(`⚠️ ${actor.name}'s ${weapon.name} out of range (${Math.round(dist)}>${range} ft).`, actor, {whisper:true});
       }
     }
+    if(attacksPerformed === 0) return false;
     return true;
   }
 
@@ -288,9 +295,9 @@ class NpcAutopilot {
       // ═════ Midi-QOL integration ═════
       const hasMidiQOL = game.modules.get("midi-qol")?.active && globalThis.MidiQOL?.Workflow;
       if(hasMidiQOL){
-        const activity = this._attackActivity(item) || this._firstActivity(item);
-        if(activity && typeof activity.use === 'function'){
-          await activity.use({
+        const activityM = this._attackActivity(item) || this._firstActivity(item);
+        if(activityM && typeof activityM.use === 'function'){
+          await activityM.use({
             configureDialog: false,
             createMessage: true,
             midiOptions: {
@@ -309,70 +316,40 @@ class NpcAutopilot {
 
       // ═════ Native standalone automation ═════
       const activity = this._attackActivity(item);
-      if(activity && typeof activity.rollAttack === 'function'){
-        // Build usage config
-        const usage = activity.getUsageConfig?.() ?? {};
-        usage.target = [targetToken.document?.uuid || targetToken.uuid];
-
-        // Roll attack
-        let attackRolls;
-        try{
-          const usage = activity.getUsageConfig?.() ?? {};
-          usage.target = [targetToken.document?.uuid || targetToken.uuid];
-          attackRolls = await activity.rollAttack(usage, {}, { configure: false, fastForward: true });
-        }catch(e){ console.warn('[NPC Autopilot] rollAttack error', e); }
-
-        if(!attackRolls?.length){
-          await this._say(`❌ ${actor.name} couldn't roll attack with ${item.name}`, actor, {whisper:true});
-          return;
-        }
-
-        const toHit = attackRolls[0].total;
-        const targetAC = targetToken.actor?.system?.attributes?.ac?.value || 10;
-
-        if(toHit < targetAC){
-          await this._say(`❌ ${actor.name} attacks ${targetToken.name} with ${item.name} and misses! (Rolled ${toHit} vs AC ${targetAC})`, actor);
-          return;
-        }
-
-        // HIT — roll damage
-        await this._say(`💥 ${actor.name} hits ${targetToken.name} with ${item.name}! (Attack roll ${toHit})`, actor);
-
-        let damageRolls;
-        try{
-          damageRolls = await activity.rollDamage(usage, {}, { configure: false, fastForward: true });
-        }catch(e){ console.warn('[NPC Autopilot] rollDamage error', e); }
-
-        if(damageRolls?.length){
-          const totalDamage = damageRolls.reduce((sum, r) => sum + (r.total || 0), 0);
-          const dmgType = activity.damage?.parts?.[0]?.[1] || "slashing";
-
-          // Apply damage to target
-          const targetActor = targetToken.actor;
-          const hp = targetActor?.system?.attributes?.hp;
-          if(hp && totalDamage > 0){
-            const newHP = Math.max(0, hp.value - totalDamage);
-            await targetActor.update({"system.attributes.hp.value": newHP});
-          }
-
-          await this._say(`💥 ${actor.name} deals **${totalDamage}** ${dmgType} damage to ${targetToken.name}!`, actor);
-        }
+      if(activity && typeof activity.use === 'function'){
+        // In v4, activity.use({target: [uuid], consume: false}, {configure: false}, {create: true})
+        const usage = { target: [targetToken.document?.uuid || targetToken.uuid], consume: false };
+        await activity.use(usage, { configure: false }, { create: true });
         return;
       }
 
-      // FALLBACK: v3 item.use() or legacy
+      // v3 fallback — try old item API
+      if(typeof item.rollAttack === 'function'){
+        const atk = await item.rollAttack({event: null, fastForward: true});
+        if(!atk || !atk.total){ await this._say(`❌ ${actor.name} misses ${targetToken.name}!`, actor); return; }
+        const targetAC = targetToken.actor?.system?.attributes?.ac?.value || 10;
+        if(atk.total < targetAC){
+          await this._say(`❌ ${actor.name} attacks ${targetToken.name} and misses! (Rolled ${atk.total} vs AC ${targetAC})`, actor);
+          return;
+        }
+        await this._say(`💥 ${actor.name} hits ${targetToken.name} with ${item.name}! (Attack roll ${atk.total})`, actor);
+        if(typeof item.rollDamage==='function'){
+          const dmg = await item.rollDamage({event: null, fastForward: true});
+          if(dmg?.total){
+            const hp = targetToken.actor?.system?.attributes?.hp;
+            if(hp){ const newHP = Math.max(0, hp.value - dmg.total); await targetToken.actor.update({"system.attributes.hp.value": newHP}); }
+          }
+        }
+        return;
+      }
       if(typeof item.use==='function'){
         await item.use({configure:false, createMessage:true});
-        return;
-      }
-      if(typeof item.rollAttack==='function'){
-        await item.rollAttack({event:null});
         return;
       }
 
       // MANUAL legacy fallback
       const bonus=this._getAtkBonus(actor,item);
-      const roll=await new Roll(`1d20+${bonus}`).evaluate();
+      const roll = await new Roll(`1d20+${bonus}`).evaluate();
       await roll.toMessage({speaker:ChatMessage.getSpeaker({actor}), flavor:`${actor.name} attacks ${targetToken.name} with ${item.name}`});
     }catch(e){
       console.warn('[NPC Autopilot] attack error', e);
@@ -426,11 +403,18 @@ class NpcAutopilot {
       }
 
       // ═════ Native fallback ═════
-      const activity=this._firstActivity(item);
-      if(activity&&typeof activity.use==='function'){
-        await activity.use({configure:false, createMessage:true}); return;
+      const activityB=this._firstActivity(item);
+      if(activityB&&typeof activityB.use==='function'){
+        // v4 canonical: activity.use(usageConfig, dialogConfig, messageConfig)
+        const usage = { consume: false };
+        if(targetToken) usage.target = [targetToken.document?.uuid || targetToken.uuid];
+        await activityB.use(usage, { configure: false }, { create: true });
+        return;
       }
-      if(typeof item.use==='function'){ await item.use({configure:false, createMessage:true}); return; }
+      if(typeof item.use==='function'){
+        await item.use({configure:false, createMessage:true});
+        return;
+      }
       await this._say(`🔥 **${actor.name}** uses **${item.name}** on **${targetToken?.name||'target'}**!`, actor);
     }catch(e){
       console.warn('[NPC Autopilot] useItem error', e);
@@ -506,34 +490,41 @@ class NpcAutopilot {
     if(!selfToken||!targetToken||!canvas?.grid)return'';
     const self=selfToken.document||selfToken;
     const target=targetToken.document||targetToken;
-    const range=this._getWeaponRange(weapon);
     const gridDist=canvas.grid.distance||5;
-    const rangePx=(range/gridDist)*canvas.grid.size;
-    const rangeSq=rangePx*rangePx;
-
-    const dx=self.x-target.x, dy=self.y-target.y;
-    if(dx*dx+dy*dy<=rangeSq) return'';
-
+    const gridPx=canvas.grid.size||50;
+    const distFt=this._tokenDistanceFt(selfToken, targetToken);
     const speed=selfToken.actor?.system?.attributes?.movement?.walk||30;
-    const maxPx=(speed/gridDist)*canvas.grid.size;
+
+    // ── Ranged-only NPCs already in range ──
+    const range=this._getWeaponRange(weapon);
+    if(range>10 && distFt<=range && distFt>speed+15){
+      // Have ranged, target is within range but too far to reach melee — fire from here
+      return '';
+    }
+
+    // ── Everyone else: close to melee (5 ft) ──
+    const meleePx=(5/gridDist)*gridPx;
+    const dx=self.x-target.x, dy=self.y-target.y;
+    const total=Math.hypot(dx,dy);
+    if(total<=meleePx) return '';
+
+    const maxPx=(speed/gridDist)*gridPx;
+    const angle=Math.atan2(target.y-self.y, target.x-self.x);
+    const move=Math.min(maxPx, total-meleePx);
+    if(move<=0) return '';
 
     let dest=this._findFlankPosition(self, target);
-    if(!dest){
-      const angle=Math.atan2(target.y-self.y, target.x-self.x);
-      const total=Math.hypot(dx,dy);
-      const move=Math.min(maxPx, total-Math.sqrt(rangeSq)*0.8);
-      if(move<=0)return'';
-      dest={x:self.x+Math.cos(angle)*move, y:self.y+Math.sin(angle)*move};
-    }
+    if(!dest) dest={x:self.x+Math.cos(angle)*move, y:self.y+Math.sin(angle)*move};
+
     const snapped=canvas.grid.getSnappedPoint?canvas.grid.getSnappedPoint({x:dest.x,y:dest.y},{mode:CONST.GRID_SNAPPING_MODES.CENTER}):dest;
     const hit=CONFIG.Canvas.polygonBackends?.move?.testCollision?CONFIG.Canvas.polygonBackends.move.testCollision({x:self.x,y:self.y}, snapped, {type:'move',mode:'any'}):false;
     if(hit){
       const safe=this._findSafePosition(self,snapped,maxPx);
-      if(safe){await self.update({x:safe.x,y:safe.y});return`${selfToken.name} manoeuvres closer.`;}
-      return'';
+      if(safe){await self.update({x:safe.x,y:safe.y}); return `${selfToken.name} manoeuvres closer.`;}
+      return '';
     }
     await self.update({x:snapped.x,y:snapped.y});
-    return`${selfToken.name} advances toward ${targetToken.name}.`;
+    return `${selfToken.name} advances toward ${targetToken.name}.`;
   }
 
   static async _npcRetreat(selfToken, enemyTokens){
