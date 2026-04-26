@@ -1,13 +1,31 @@
 {
   "id": "ai-companion",
-  "title": "NPC Autopilot v3.2",
+  "title": "NPC Autopilot v3.3",
   "description": "Foundry VTT NPC combat autopilot. Full-turn automation with per-NPC toggles.",
-  "version": "3.2.0",
-  "authors": [{ "name": "Steve" }],
-  "compatibility": { "minimum": "11", "verified": "14", "maximum": "14" },
-  "esmodules": ["scripts/npc-autopilot.js"],
-  "styles": ["styles/npc-autopilot.css"],
-  "languages": [{ "lang": "en", "name": "English", "path": "lang/en.json" }],
+  "version": "3.3.0",
+  "authors": [
+    {
+      "name": "Steve"
+    }
+  ],
+  "compatibility": {
+    "minimum": "11",
+    "verified": "14",
+    "maximum": "14"
+  },
+  "esmodules": [
+    "scripts/npc-autopilot.js"
+  ],
+  "styles": [
+    "styles/npc-autopilot.css"
+  ],
+  "languages": [
+    {
+      "lang": "en",
+      "name": "English",
+      "path": "lang/en.json"
+    }
+  ],
   "manifest": "https://raw.githubusercontent.com/darrenmcguff-GRC/ai-companion/main/module.json",
   "download": "https://raw.githubusercontent.com/darrenmcguff-GRC/ai-companion/main/ai-companion.zip",
   "url": "https://github.com/darrenmcguff-GRC/ai-companion"
