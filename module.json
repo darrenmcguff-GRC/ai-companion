@@ -2,7 +2,7 @@
   "id": "ai-companion",
   "title": "NPC Autopilot v3.5.3",
   "description": "Foundry VTT NPC combat autopilot. v3.5.3: fixed CHAT_MESSAGE_TYPES, HTML multiattack parsing, auto-roll attack/damage.",
-  "version":"3.5.3",
+  "version": "3.5.3",
   "authors": [
     {
       "name": "Steve"
@@ -28,5 +28,6 @@
   ],
   "manifest": "https://raw.githubusercontent.com/darrenmcguff-GRC/ai-companion/main/module.json",
   "download": "https://raw.githubusercontent.com/darrenmcguff-GRC/ai-companion/main/ai-companion.zip",
-  "url": "https://github.com/darrenmcguff-GRC/ai-companion"
+  "url": "https://github.com/darrenmcguff-GRC/ai-companion",
+  "readme": "https://raw.githubusercontent.com/darrenmcguff-GRC/ai-companion/main/README.md"
 }
