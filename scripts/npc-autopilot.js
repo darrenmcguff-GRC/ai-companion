@@ -1,7 +1,7 @@
 const MODULE_ID = 'ai-companion';
 
 /* ═══════════════════════════════════════════════════════════════════
-  /* NPC AUTOPILOT v3.5.2 — Foundry VTT D&D 5e
+   NPC AUTOPILOT v3.5.3 — Foundry VTT D&D 5e
    Full-turn automation with per-NPC toggles, proper targeting,
    range checks, weapon appropriateness, native attack/damage rolling,
    and optional Midi-QOL integration.
@@ -227,7 +227,7 @@ class NpcAutopilot {
     if(!weapon)return false;
     const props=weapon.system?.properties||[];
     if(Array.isArray(props))return props.includes('lgt')||props.includes('light');
-    if(typeof props==='object'&&props!==null)return props.lgt||props.light;
+    if(typeof props==='object'&&props!==null) return !!(props.lgt||props.light);
     return false;
   }
 
@@ -235,8 +235,11 @@ class NpcAutopilot {
   static async _doMultiattack(actor, enemyTokens, items, selfToken) {
     const multi = items.find(i=>i.type==='feat'&&/multiattack/i.test(i.name));
     if(!multi) return false;
-    const desc=(multi.system?.description?.value||'').toLowerCase();
-    this._log(`Multiattack: "${desc.slice(0,100)}"`);
+
+    // ── Strip HTML tags before parsing ──
+    let rawDesc = multi.system?.description?.value || '';
+    const desc = rawDesc.replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim().toLowerCase();
+    this._log(`Multiattack: "${desc.slice(0,120)}"`);
 
     // Map all usable attack items by name
     const weaponMap={};
@@ -249,13 +252,12 @@ class NpcAutopilot {
 
     const attacks=[];
 
-    // Extract "N attacks with weapon" patterns
+    // ── Pattern A: "N attacks with its weapon" ──
     let m;
-    // Matches: "makes two attacks with its scimitar", "one attack with its shortsword", etc.
-    const rx=/(?:makes\s+)?(\w+|\d+)\s+(?:\w+\s+)?attack[s]?\s+(?:with\s+(?:its\s+|their\s+|a\s+)?)?([\w\s]+?)(?:\.|,|\s+and|\s+or|attacks?|using)/gi;
-    while((m=rx.exec(desc))!==null){
+    const rxA = /(?:makes\s+)?(\w+|\d+)\s+(?:\w+\s+)?attack[s]?\s+(?:with\s+(?:its\s+|their\s+|a\s+)?)?([\w\s]+?)(?:\.|,|\s+and\s|\s+using\s|\s+attacks?\b|\s+each\b)/gi;
+    while((m=rxA.exec(desc))!==null){
       const count=this._wordToNum(m[1]);
-      const rawName=m[2].trim();
+      const rawName=m[2].trim().replace(/^(?:its\s|their\s|a\s)/, '');
       let matched=weaponMap[rawName.toLowerCase()];
       if(!matched) matched=weaponMap[rawName.toLowerCase().replace(/\s+/g,'')];
       if(!matched){
@@ -265,7 +267,27 @@ class NpcAutopilot {
       if(matched) for(let i=0;i<count;i++) attacks.push(matched);
     }
 
-    // Fallback: any weapon-like feat mentioned by name in the description
+    // ── Pattern B: "using scimitar or shortbow"  →  parse weapon list ──
+    if(!attacks.length){
+      const rxB = /(?:using|with|or)\s+([\w\s,]+?)\s+(?:in any combination|in any order|alternatively)/i;
+      const bm = desc.match(rxB);
+      if(bm){
+        const parts = bm[1].split(/\s+or\s+|,\s+/);
+        for(const p of parts){
+          const raw = p.trim();
+          if(!raw) continue;
+          let matched = weaponMap[raw.toLowerCase()];
+          if(!matched) matched = weaponMap[raw.toLowerCase().replace(/\s+/g,'')];
+          if(!matched){
+            const rl = raw.toLowerCase().replace(/\s+/g,'');
+            for(const [k,v] of Object.entries(weaponMap)){ if(k.includes(rl)||rl.includes(k)){matched=v;break;} }
+          }
+          if(matched) attacks.push(matched);
+        }
+      }
+    }
+
+    // ── Pattern C: explicit weapon names anywhere in description ──
     if(!attacks.length){
       for(const it of items){
         if(it.type==='feat'&&/multiattack/i.test(it.name)) continue;
@@ -277,20 +299,20 @@ class NpcAutopilot {
 
     if(!attacks.length) return false;
 
-    // Lock a single target for the "same attack" group (described as "makes N attacks
-    // with its shortsword" = same target). 
-    // If the NPC has multiple distinct weapons, they can switch if the current one goes out of range.
+    // Multiattack says "makes two attacks" — if pattern A gave a count, honour it;
+    // otherwise default to 2 attacks with the first matched weapon.
     let lockedTarget=this._pickTarget(enemyTokens, selfToken, actor);
+    let finalAttacks = attacks;
+    if(finalAttacks.length === 1 && attacks.length < 2){
+      finalAttacks = [attacks[0], attacks[0]]; // two swings with same weapon
+    }
 
     let attacksPerformed = 0;
     let lastWeapon=null;
-    for(const weapon of attacks){
-      // If weapon changed from last swing, decide whether to switch target
+    for(const weapon of finalAttacks){
       const weaponChanged = lastWeapon && lastWeapon.id !== weapon.id;
       let target = lockedTarget;
       if(weaponChanged){
-        // Re-evaluate distance to the locked target; if out of range for this weapon,
-        // pick a new target that IS in range
         const dist = this._tokenDistanceFt(selfToken, lockedTarget);
         const range = this._getWeaponRange(weapon);
         if(lockedTarget && dist > range+3){
@@ -300,7 +322,7 @@ class NpcAutopilot {
           target = inRange.length ? this._pickTarget(inRange, selfToken, actor) : this._pickTarget(enemyTokens, selfToken, actor);
         }
       }
-      if(!target) continue;
+      if(!target) { lastWeapon=weapon; continue; }
 
       const dist=this._tokenDistanceFt(selfToken, target);
       const range=this._getWeaponRange(weapon);
@@ -379,27 +401,27 @@ class NpcAutopilot {
         const activity = this._attackActivity(item);
         if(activity && typeof activity.use === 'function'){
           this._log(`→ PATH 2: dnd5e v4 activity.use() type=${activity.type||'?'} name=${activity.name||'?'}`);
+          const isAttackActivity = activity.type === 'attack' || activity.name?.toLowerCase()?.includes('attack');
           try{
-            // v4 canonical: usageConfig, dialogConfig, messageConfig
-            // DO NOT pass target UUIDs in the usage — dnd5e v4 reads targets from canvas.user.targets
+            // For attack activities: just create the card, then let PATH 4 handle the actual roll
+            let msgConfig = { create: isAttackActivity ? false : true };
             await activity.use(
               { consume: false },
               { configure: false },
-              { create: true }
+              msgConfig
             );
-            this._log(`✓ PATH 2 (v4 canonical) succeeded`);
-            executed = true;
+            this._log(`✓ PATH 2 (v4 canonical) ${isAttackActivity ? 'prepared' : 'succeeded'}`);
+            if(!isAttackActivity) executed = true;
           }catch(e2){
             this._log(`✗ PATH 2a failed: ${e2.message}`);
-            // v4 alternate: flattened single-object config (some point releases)
             try{
               await activity.use({
                 configureDialog: false,
-                createMessage: true,
+                createMessage: !isAttackActivity,
                 consume: false
               });
               this._log(`✓ PATH 2b (flat config) succeeded`);
-              executed = true;
+              if(!isAttackActivity) executed = true;
             }catch(e3){ this._log(`✗ PATH 2b failed: ${e3.message}`); }
           }
         } else {
@@ -415,6 +437,35 @@ class NpcAutopilot {
           this._log(`✓ PATH 3 succeeded`);
           executed = true;
         }catch(e4){ this._log(`✗ PATH 3 failed: ${e4.message}`); }
+      }
+
+      // ═════ PATH 3.5: dnd5e v4 activity rollAttack / rollDamage ═════
+      if(!executed){
+        const activity = this._attackActivity(item);
+        if(activity && typeof activity.rollAttack === 'function'){
+          this._log(`→ PATH 3.5: dnd5e v4 activity.rollAttack for ${item.name}`);
+          try{
+            const atk = await activity.rollAttack?.({event: null, fastForward: true});
+            if(!atk || atk.total === undefined){
+              await this._say(`❌ ${actor.name} attacks ${targetToken.name} but the attack roll failed.`, actor);
+            } else {
+              const targetAC = targetToken.actor?.system?.attributes?.ac?.value || 10;
+              if(atk.total < targetAC){
+                await this._say(`❌ ${actor.name} attacks ${targetToken.name} and misses! (Rolled ${atk.total} vs AC ${targetAC})`, actor);
+              } else {
+                await this._say(`💥 ${actor.name} hits ${targetToken.name} with ${item.name}! (Attack roll ${atk.total})`, actor);
+                if(typeof activity.rollDamage === 'function'){
+                  const dmg = await activity.rollDamage?.({event: null, fastForward: true});
+                  if(dmg?.total !== undefined){
+                    const hp = targetToken.actor?.system?.attributes?.hp;
+                    if(hp){ const newHP = Math.max(0, hp.value - dmg.total); await targetToken.actor.update({"system.attributes.hp.value": newHP}); }
+                  }
+                }
+              }
+            }
+            executed = true;
+          }catch(raErr){ this._log(`✗ PATH 3.5 failed: ${raErr.message}`); }
+        }
       }
 
       // ═════ PATH 4: dnd5e legacy item.rollAttack() / rollDamage() ═════
@@ -827,7 +878,14 @@ class NpcAutopilot {
     return mod+prof;
   }
   static async _say(content,actor,opts={}){
-    await ChatMessage.create({user:game.userId,speaker:ChatMessage.getSpeaker({actor}),content:`<p>${content}</p>`,type:CONST.CHAT_MESSAGE_TYPES.OTHER,whisper:opts.whisper?[game.userId]:[]});
+    const msgType = CONST.CHAT_MESSAGE_TYPES?.OTHER ?? 0;
+    await ChatMessage.create({
+      user:game.userId,
+      speaker:ChatMessage.getSpeaker({actor}),
+      content:`<p>${content}</p>`,
+      type:msgType,
+      whisper:opts.whisper?[game.userId]:[]
+    });
   }
   static _log(m){console.log(`%c[NPC Autopilot] ${m}`,'color:#8b5cf6;font-weight:bold');}
   static _wait(ms){return new Promise(r=>setTimeout(r,ms));}
