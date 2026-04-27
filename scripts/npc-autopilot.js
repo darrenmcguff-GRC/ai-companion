@@ -1,10 +1,18 @@
 const MODULE_ID = 'ai-companion';
 
 /* ═══════════════════════════════════════════════════════════════════
-   NPC AUTOPILOT v3.5.5 — Foundry VTT D&D 5e
+   NPC AUTOPILOT v3.5.6 — Foundry VTT D&D 5e
    Full-turn automation with per-NPC toggles, proper targeting,
    range checks, weapon appropriateness, native attack/damage rolling,
    and optional Midi-QOL integration.
+
+   v3.5.6 changes:
+   • dnd5e v5.3.2 native fast-roll: calls activity.rollAttack(config,
+     dialog={configure:false}, message) to SKIP roll dialogs entirely.
+     This makes auto-roll work WITHOUT requiring Midi-QOL.
+   • Updated _useItem() to match dnd5e v5.3+ activity.use(usage, dialog
+     {configure:false}, message) so spells/items also skip dialogs.
+   • All paths re-ordered: Midi-QOL → Native v5.3 → Legacy → Manual.
 
    v3.5.5 changes:
    • Fast-Roll Mode setting: when ON, attack & damage rolls happen
@@ -408,6 +416,13 @@ class NpcAutopilot {
   /* ═══════════════════════════════════════════════════════════════════
      ATTACK / USE ITEM — per-attempt fallback chain with full logging
      ═══════════════════════════════════════════════════════════════════ */
+
+  /**
+   * Primary attack routine — works with OR WITHOUT Midi-QOL.
+   * In dnd5e v5.3+, activity.rollAttack(config, dialog={configure:false}, message)
+   * skips prompts. We call it directly rather than activity.use() which would
+   * still show the attack config dialog via _triggerSubsequentActions.
+   */
   static async _npcAttack(actor, item, targetToken, selfToken) {
     if(!item){ await this._say(`⚠️ ${actor.name} has no weapon.`, actor, {whisper:true}); return; }
     if(!targetToken){ await this._say(`⚠️ ${actor.name} has no target.`, actor, {whisper:true}); return; }
@@ -431,26 +446,22 @@ class NpcAutopilot {
     if(fastRoll && mqol?.configSettings){
       const cs = mqol.configSettings;
       midiBackup = {
-        autoRollAttack: cs.autoRollAttack,
-        autoRollDamage: cs.autoRollDamage,
-        gmAutoAttack: cs.gmAutoAttack,
-        gmAutoDamage: cs.gmAutoDamage,
-        autoFastForward: [...(cs.autoFastForward || [])],
-        gmAutoFastForward: [...(cs.gmAutoFastForward || [])]
+        autoRollAttack: cs.autoRollAttack, autoRollDamage: cs.autoRollDamage,
+        gmAutoAttack: cs.gmAutoAttack, gmAutoDamage: cs.gmAutoDamage,
+        autoFastForward: [...(cs.autoFastForward||[])], gmAutoFastForward: [...(cs.gmAutoFastForward||[])]
       };
-      cs.autoRollAttack = true;
-      cs.autoRollDamage = "onHit";
-      cs.gmAutoAttack = true;
-      cs.gmAutoDamage = "onHit";
+      cs.autoRollAttack = true;  cs.autoRollDamage = "onHit";
+      cs.gmAutoAttack = true;    cs.gmAutoDamage = "onHit";
       for(const arr of [cs.autoFastForward, cs.gmAutoFastForward]){
         if(!Array.isArray(arr)) continue;
-        if(!arr.includes("attack")) arr.push("attack");
+        if(!arr.includes("attack"))  arr.push("attack");
         if(!arr.includes("damage"))  arr.push("damage");
       }
-      this._log(`midi-qol config bumped → autoRollAttack=true autoRollDamage=onHit`);
+      this._log(`midi-qol config bumped → autoRollAttack=true autoRollDamage=onHit fastForward=[attack,damage]`);
     }
 
     try{
+      /* ── Lock canvas target / selection ── */
       const tgt = targetToken.object || targetToken;
       const self = selfToken?.object || selfToken;
       if(tgt?.setTarget) tgt.setTarget(true, {user: game.user, releaseOthers: true});
@@ -458,50 +469,61 @@ class NpcAutopilot {
       await this._wait(50);
 
       let executed = false;
+      const activity = this._attackActivity(item);
 
-      // ═════ PATH A: Midi-QOL via activity.use() (config already bumped) ═════
-      if(!executed && mqol?.Workflow){
-        const act = this._attackActivity(item) || this._firstActivity(item);
-        if(act && typeof act.use === 'function'){
-          this._log(`→ PATH A: Midi-QOL activity.use() for ${item.name}`);
-          try{
-            await act.use(
-              {consume:false},
-              {configure:false},
-              {create:true}
-            );
-            this._log(`✓ PATH A succeeded`);
-            executed = true;
-          }catch(e1){ this._log(`✗ PATH A (Midi-QOL) failed: ${e1.message}`); }
-        }
+      // ═════ PATH A: Midi-QOL — rely on its Workflow wrapper ═════
+      if(!executed && mqol?.Workflow && activity && typeof activity.use === 'function'){
+        this._log(`→ PATH A: Midi-QOL activity.use() for ${item.name}`);
+        try{
+          await activity.use({consume:false}, {configure:false}, {create:true});
+          this._log(`✓ PATH A succeeded`);
+          executed = true;
+        }catch(e1){ this._log(`✗ PATH A (Midi-QOL) failed: ${e1.message}`); }
       }
 
-      // ═════ PATH B: dnd5e v4 activity.rollAttack + rollDamage ═════
-      if(!executed){
-        const activity = this._attackActivity(item);
-        if(activity && typeof activity.rollAttack === 'function'){
-          this._log(`→ PATH B: dnd5e v4 rollAttack for ${item.name}`);
-          try{
-            const atk = await activity.rollAttack({event: null, fastForward: fastRoll});
-            if(atk && atk.total !== undefined){
-              const targetAC = targetToken.actor?.system?.attributes?.ac?.value || 10;
-              if(atk.total >= targetAC){
-                await this._say(`💥 ${actor.name} hits ${targetToken.name} with ${item.name}! (Attack roll ${atk.total})`, actor);
-                if(typeof activity.rollDamage === 'function'){
-                  await activity.rollDamage({event: null, fastForward: fastRoll});
-                }
-              } else {
-                await this._say(`❌ ${actor.name} attacks ${targetToken.name} and misses! (Rolled ${atk.total} vs AC ${targetAC})`, actor);
+      // ═════ PATH B: dnd5e v5.3+ native — manual rollAttack + rollDamage ═════
+      if(!executed && activity && typeof activity.rollAttack === 'function'){
+        this._log(`→ PATH B: dnd5e v5.3+ native fast-roll for ${item.name}`);
+        try{
+          // Skip dialog via dialog={configure:false}
+          const attackRolls = await activity.rollAttack(
+            {event: null, target: targetToken.actor ? {ac: targetToken.actor.system?.attributes?.ac?.value || 10} : undefined},
+            {configure: false},
+            {create: true}
+          );
+
+          if(attackRolls && attackRolls.length){
+            const atk = attackRolls[0];
+            const targetAC = targetToken.actor?.system?.attributes?.ac?.value || 10;
+            const isHit = atk.total >= targetAC;
+            const isCrit = atk.isCritical || false;
+
+            if(isHit){
+              const hitMsg = isCrit
+                ? `💥 ${actor.name} lands a **critical hit** on ${targetToken.name} with ${item.name}! (Roll ${atk.total})`
+                : `💥 ${actor.name} hits ${targetToken.name} with ${item.name}! (Roll ${atk.total})`;
+              await this._say(hitMsg, actor);
+
+              // Chain into damage roll
+              if(typeof activity.rollDamage === 'function'){
+                await activity.rollDamage(
+                  {event: null, isCritical: isCrit},
+                  {configure: false},
+                  {create: true}
+                );
               }
             } else {
-              await this._say(`❌ ${actor.name} attacks ${targetToken.name} but the attack roll failed.`, actor);
+              await this._say(`❌ ${actor.name} attacks ${targetToken.name} and misses! (Rolled ${atk.total} vs AC ${targetAC})`, actor);
             }
-            executed = true;
-          }catch(e2){ this._log(`✗ PATH B failed: ${e2.message}`); }
-        }
+            this._log(`✓ PATH B succeeded (native v5.3 attack→damage)`);
+          } else {
+            this._log(`✗ PATH B: rollAttack returned no rolls`);
+          }
+          executed = true;
+        }catch(e2){ this._log(`✗ PATH B failed: ${e2.message}`); }
       }
 
-      // ═════ PATH C: legacy item.use() ═════
+      // ═════ PATH C: dnd5e legacy item.use() ═════
       if(!executed && typeof item.use === 'function'){
         this._log(`→ PATH C: legacy item.use() for ${item.name}`);
         try{
@@ -511,7 +533,7 @@ class NpcAutopilot {
         }catch(e3){ this._log(`✗ PATH C failed: ${e3.message}`); }
       }
 
-      // ═════ PATH D: legacy item.rollAttack / rollDamage ═════
+      // ═════ PATH D: dnd5e legacy item.rollAttack / rollDamage ═════
       if(!executed && typeof item.rollAttack === 'function'){
         this._log(`→ PATH D: legacy rollAttack for ${item.name}`);
         try{
@@ -527,6 +549,7 @@ class NpcAutopilot {
               await this._say(`❌ ${actor.name} attacks ${targetToken.name} and misses! (Rolled ${atk.total} vs AC ${targetAC})`, actor);
             }
           }
+          this._log(`✓ PATH D succeeded`);
           executed = true;
         }catch(e4){ this._log(`✗ PATH D failed: ${e4.message}`); }
       }
@@ -547,7 +570,7 @@ class NpcAutopilot {
 
     }catch(err){
       console.error('[NPC Autopilot] attack fatal error', err);
-      await this._say(`⚠️ ${item.name} fatal error: ${err.message}`, actor, {whisper:true});
+      await this._say(`⚠️ ${err.message}`, actor, {whisper:true});
     }finally{
       // Restore Midi-QOL config
       if(midiBackup && mqol?.configSettings){
@@ -573,6 +596,9 @@ class NpcAutopilot {
     }
   }
 
+  /**
+   * Spell / item usage — works with OR WITHOUT Midi-QOL.
+   */
   static async _useItem(actor, item, targetToken, selfToken) {
     if(!item) return;
     this._log(`_useItem: ${actor.name} → ${item.name}`);
@@ -585,20 +611,15 @@ class NpcAutopilot {
     if(fastRoll && mqol?.configSettings){
       const cs = mqol.configSettings;
       midiBackup = {
-        autoRollAttack: cs.autoRollAttack,
-        autoRollDamage: cs.autoRollDamage,
-        gmAutoAttack: cs.gmAutoAttack,
-        gmAutoDamage: cs.gmAutoDamage,
-        autoFastForward: [...(cs.autoFastForward || [])],
-        gmAutoFastForward: [...(cs.gmAutoFastForward || [])]
+        autoRollAttack: cs.autoRollAttack, autoRollDamage: cs.autoRollDamage,
+        gmAutoAttack: cs.gmAutoAttack, gmAutoDamage: cs.gmAutoDamage,
+        autoFastForward: [...(cs.autoFastForward||[])], gmAutoFastForward: [...(cs.gmAutoFastForward||[])]
       };
-      cs.autoRollAttack = true;
-      cs.autoRollDamage = "always"; // spells always roll damage (if applicable)
-      cs.gmAutoAttack = true;
-      cs.gmAutoDamage = "always";
+      cs.autoRollAttack = true;  cs.autoRollDamage = "always"; // spells always roll damage if applicable
+      cs.gmAutoAttack = true;    cs.gmAutoDamage = "always";
       for(const arr of [cs.autoFastForward, cs.gmAutoFastForward]){
         if(!Array.isArray(arr)) continue;
-        if(!arr.includes("attack")) arr.push("attack");
+        if(!arr.includes("attack"))  arr.push("attack");
         if(!arr.includes("damage"))  arr.push("damage");
       }
     }
@@ -613,40 +634,35 @@ class NpcAutopilot {
       await this._wait(50);
 
       let executed = false;
+      const activity = this._firstActivity(item);
 
       // PATH 1: Midi-QOL (config already bumped)
-      if(mqol?.Workflow){
-        const activity = this._firstActivity(item);
-        if(activity && typeof activity.use === 'function'){
-          try{
-            await activity.use({consume:false},{configure:false},{create:true});
-            this._log(`_useItem PATH 1 (Midi) ok`);
-            executed = true;
-          }catch(e){ this._log(`_useItem PATH 1 failed: ${e.message}`); }
-        }
+      if(mqol?.Workflow && activity && typeof activity.use === 'function'){
+        try{
+          await activity.use({consume:false},{configure:false},{create:true});
+          this._log(`_useItem PATH 1 (Midi) ok`);
+          executed = true;
+        }catch(e){ this._log(`_useItem PATH 1 failed: ${e.message}`); }
       }
 
-      // PATH 2: dnd5e v4 activity.use()
-      if(!executed){
-        const activity=this._firstActivity(item);
-        if(activity && typeof activity.use==='function'){
+      // PATH 2: dnd5e v5.3+ native — skip dialog via configure:false
+      if(!executed && activity && typeof activity.use === 'function'){
+        try{
+          await activity.use({consume:false},{configure:false},{create:true});
+          this._log(`_useItem PATH 2 (v5.3) ok`);
+          executed = true;
+        }catch(e1){
+          this._log(`_useItem PATH 2a failed: ${e1.message}`);
           try{
-            await activity.use({consume:false},{configure:false},{create:true});
-            this._log(`_useItem PATH 2 (v4) ok`);
+            await activity.use({configureDialog:false,createMessage:true,consume:false});
+            this._log(`_useItem PATH 2b ok`);
             executed = true;
-          }catch(e1){
-            this._log(`_useItem PATH 2a failed: ${e1.message}`);
-            try{
-              await activity.use({configureDialog:false,createMessage:true,consume:false});
-              this._log(`_useItem PATH 2b ok`);
-              executed = true;
-            }catch(e2){ this._log(`_useItem PATH 2b failed: ${e2.message}`); }
-          }
+          }catch(e2){ this._log(`_useItem PATH 2b failed: ${e2.message}`); }
         }
       }
 
       // PATH 3: legacy item.use()
-      if(!executed && typeof item.use==='function'){
+      if(!executed && typeof item.use === 'function'){
         try{
           await item.use({configure:false, createMessage:true});
           this._log(`_useItem PATH 3 (legacy) ok`);
@@ -663,12 +679,9 @@ class NpcAutopilot {
     }finally{
       if(midiBackup && mqol?.configSettings){
         const cs = mqol.configSettings;
-        cs.autoRollAttack = midiBackup.autoRollAttack;
-        cs.autoRollDamage = midiBackup.autoRollDamage;
-        cs.gmAutoAttack = midiBackup.gmAutoAttack;
-        cs.gmAutoDamage = midiBackup.gmAutoDamage;
-        cs.autoFastForward = midiBackup.autoFastForward;
-        cs.gmAutoFastForward = midiBackup.gmAutoFastForward;
+        cs.autoRollAttack = midiBackup.autoRollAttack;   cs.autoRollDamage = midiBackup.autoRollDamage;
+        cs.gmAutoAttack = midiBackup.gmAutoAttack;       cs.gmAutoDamage = midiBackup.gmAutoDamage;
+        cs.autoFastForward = midiBackup.autoFastForward; cs.gmAutoFastForward = midiBackup.gmAutoFastForward;
       }
       if(game.user.updateTokenTargets) game.user.updateTokenTargets(oldTargets);
       for(const t of Array.from(canvas.tokens.controlled)){ const p=t.object||t; if(p.release) p.release(); }
