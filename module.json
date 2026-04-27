@@ -1,8 +1,8 @@
 {
   "id": "ai-companion",
-  "title": "NPC Autopilot v3.5.4",
-  "description": "Foundry VTT NPC combat autopilot. v3.5.4: sticky target selection, movement budget tracking, move+action+bonus action economy, two-weapon fighting fix.",
-  "version": "3.5.4",
+  "title": "NPC Autopilot v3.5.5",
+  "description": "Foundry VTT NPC combat autopilot. v3.5.5: Fast-Roll mode (no prompts, auto attack+damage), Midi-QOL config-bump integration. v3.5.4: sticky target selection, movement budget tracking, move+action+bonus action economy, two-weapon fighting fix.",
+  "version": "3.5.5",
   "authors": [
     {
       "name": "Steve"
