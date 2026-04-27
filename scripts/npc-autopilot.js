@@ -1,7 +1,7 @@
 const MODULE_ID = 'ai-companion';
 
 /* ═══════════════════════════════════════════════════════════════════
-   NPC AUTOPILOT v3.5 — Foundry VTT D&D 5e
+  /* NPC AUTOPILOT v3.5.2 — Foundry VTT D&D 5e
    Full-turn automation with per-NPC toggles, proper targeting,
    range checks, weapon appropriateness, native attack/damage rolling,
    and optional Midi-QOL integration.
@@ -32,6 +32,8 @@ Hooks.on('renderTokenHUD', (hud, html) => {
 Hooks.on('updateCombat', (combat, changed) => {
   if (!combat?.started || !game.user.isGM) return;
   if (changed.turn === undefined && changed.round === undefined) return;
+  // Reset targeting counts at the top of every new round before anyone acts
+  if (changed.round !== undefined) NpcAutopilot._resetTargetCounts();
   const c = combat.combatant;
   if (!c?.token?.actor || c.token.actor.hasPlayerOwner) return;
   if (!NpcAutopilot.isEnabled(c.token.actor)) return;
@@ -126,7 +128,7 @@ class NpcAutopilot {
       this._log(`${actor.name} turn start — ${enemyTokens.length} PCs, ${allyTokens.length} allies, HP ${Math.round(hpPct*100)}%`);
 
       // Determine target and best weapon BEFORE movement so we move to correct range
-      let targetToken = enemyTokens.length ? this._pickTarget(enemyTokens) : null;
+      let targetToken = enemyTokens.length ? this._pickTarget(enemyTokens, tokenDoc, actor) : null;
       this._log(`initial target: ${targetToken?.name||'none'} (${enemyTokens.length} enemies)`);
 
       // ── Move ──
@@ -145,8 +147,10 @@ class NpcAutopilot {
       const refreshed = canvas.tokens.get(tokenDoc.id);
       if(refreshed) tokenDoc = refreshed.document || refreshed;
       enemyTokens=this._findEnemyTokens(tokenDoc);
-      targetToken = enemyTokens.length ? this._pickTarget(enemyTokens) : null;
+      targetToken = enemyTokens.length ? this._pickTarget(enemyTokens, tokenDoc, actor) : null;
       this._log(`post-move target: ${targetToken?.name||'none'} (${enemyTokens.length} enemies)`);
+      // Track that we selected this target for this round
+      if(targetToken) this._incrementTargetCount(targetToken);
 
       // ── Full action economy ──
       await this._executeFullTurn(actor, tokenDoc, enemyTokens, allyTokens, hpPct, targetToken);
@@ -167,11 +171,14 @@ class NpcAutopilot {
     this._log(`_executeFullTurn: ${actor.name} — ${enemyTokens.length} enemies, HP ${Math.round(hpPct*100)}%, target=${targetToken?.name||'none'}`);
     const items = actor.items?.contents || [];
 
+    // ── Bonus Action pool ──
+    let bonusUsed = false;
+
     // ── Bonus Action: heal self if critical ──
     if(hpPct<0.3){
       const baHeal=this._findSpell(actor,/(healing word|mass healing word|cure wounds)/i);
       this._log(`heal check: ${baHeal ? baHeal.name : 'none found'}`);
-      if(baHeal){ await this._useItem(actor,baHeal,actor,tokenDoc); await this._wait(600); }
+      if(baHeal){ await this._useItem(actor,baHeal,actor,tokenDoc); bonusUsed=true; await this._wait(600); }
     }
 
     // ── Action: multiattack or best single attack ──
@@ -196,13 +203,15 @@ class NpcAutopilot {
       this._log(`multiattack succeeded; skipping single attack`);
     }
 
-    // ── Bonus Action: off-hand if applicable ──
-    if(targetToken){
+    // ── Bonus Action: off-hand if applicable and not already used ──
+    if(!bonusUsed && targetToken){
       const dist = this._tokenDistanceFt(tokenDoc, targetToken);
-      const offHand = this._bestWeaponForRange(actor, dist, {excludeMain:true});
       const mainWeapon = this._bestWeaponForRange(actor, dist);
-      this._log(`off-hand check: offHand=${offHand?.name||'none'}, main=${mainWeapon?.name||'none'}`);
-      if(offHand && offHand.id !== mainWeapon?.id && dist <= this._getWeaponRange(offHand) + 3){
+      const offHand = this._bestWeaponForRange(actor, dist, {excludeMain:true});
+      const mainIsLight = this._isWeaponLight(mainWeapon);
+      const offIsLight = this._isWeaponLight(offHand);
+      this._log(`off-hand check: offHand=${offHand?.name||'none'}, main=${mainWeapon?.name||'none'}, mainLight=${mainIsLight}, offLight=${offIsLight}`);
+      if(offHand && offHand.id !== mainWeapon?.id && offIsLight && dist <= this._getWeaponRange(offHand) + 3){
         await this._npcAttack(actor, offHand, targetToken, tokenDoc);
         await this._wait(600);
       }
@@ -212,6 +221,14 @@ class NpcAutopilot {
     if(!didMulti && !targetToken && hpPct<0.25){
       await this._say(`🛡️ ${actor.name} takes the **Dodge** action.`, actor);
     }
+  }
+
+  static _isWeaponLight(weapon){
+    if(!weapon)return false;
+    const props=weapon.system?.properties||[];
+    if(Array.isArray(props))return props.includes('lgt')||props.includes('light');
+    if(typeof props==='object'&&props!==null)return props.lgt||props.light;
+    return false;
   }
 
   /* ── Multiattack: parse feat description and roll ALL attacks ── */
@@ -260,10 +277,31 @@ class NpcAutopilot {
 
     if(!attacks.length) return false;
 
+    // Lock a single target for the "same attack" group (described as "makes N attacks
+    // with its shortsword" = same target). 
+    // If the NPC has multiple distinct weapons, they can switch if the current one goes out of range.
+    let lockedTarget=this._pickTarget(enemyTokens, selfToken, actor);
+
     let attacksPerformed = 0;
+    let lastWeapon=null;
     for(const weapon of attacks){
-      const target=this._pickTarget(enemyTokens);
+      // If weapon changed from last swing, decide whether to switch target
+      const weaponChanged = lastWeapon && lastWeapon.id !== weapon.id;
+      let target = lockedTarget;
+      if(weaponChanged){
+        // Re-evaluate distance to the locked target; if out of range for this weapon,
+        // pick a new target that IS in range
+        const dist = this._tokenDistanceFt(selfToken, lockedTarget);
+        const range = this._getWeaponRange(weapon);
+        if(lockedTarget && dist > range+3){
+          const inRange=enemyTokens.filter(t=>{
+            const d=this._tokenDistanceFt(selfToken,t); return d<=range+3;
+          });
+          target = inRange.length ? this._pickTarget(inRange, selfToken, actor) : this._pickTarget(enemyTokens, selfToken, actor);
+        }
+      }
       if(!target) continue;
+
       const dist=this._tokenDistanceFt(selfToken, target);
       const range=this._getWeaponRange(weapon);
       if(dist <= range + 3){
@@ -273,6 +311,7 @@ class NpcAutopilot {
       } else {
         await this._say(`⚠️ ${actor.name}'s ${weapon.name} out of range (${Math.round(dist)}>${range} ft).`, actor, {whisper:true});
       }
+      lastWeapon=weapon;
     }
     if(attacksPerformed === 0) return false;
     return true;
@@ -556,12 +595,49 @@ class NpcAutopilot {
 
   static _findSpell(actor,rx){ return(actor.items?.contents||[]).find(i=>i.type==='spell'&&rx.test(i.name)); }
 
-  static _pickTarget(enemyTokens){
+  static _pickTarget(enemyTokens, selfToken=null, actor=null){
     if(!enemyTokens.length)return null;
-    return enemyTokens.slice().sort((a,b)=>{
-      const ha=a.actor?.system?.attributes?.hp||{},hb=b.actor?.system?.attributes?.hp||{};
-      return(ha.value||0)-(hb.value||0);
-    })[0];
+    if(enemyTokens.length===1)return enemyTokens[0];
+
+    // Build scored list: prefer wounded but spread love across targets this round
+    const scored = enemyTokens.map(t=>{
+      const hp = t.actor?.system?.attributes?.hp||{};
+      const hpPct = (hp.value||0)/Math.max(1,hp.max||1);
+      const dist = selfToken ? this._tokenDistanceFt(selfToken, t) : 30;
+      const targetCount = this._getTargetedCountThisRound(t);
+      const jitter = this._hashFloat(actor?.id||selfToken?.id||'', t.id||'');
+      // Rebalanced: lower HP weight (25), higher distance weight (1.2), higher jitter (20),
+      // and a flat 18-point penalty for every time this target was already picked this round.
+      const score = (hpPct*25) + (dist*1.2) + (targetCount*18) + (jitter*20);
+      return{token:t, score};
+    });
+    scored.sort((a,b)=>a.score-b.score);
+    return scored[0].token;
+  }
+
+  /* Track how many times a token was chosen as a target this combat round */
+  static _getTargetedCountThisRound(token){
+    if(!game.combat) return 0;
+    const counts = game.combat.getFlag(MODULE_ID, 'targetCounts') || {};
+    return counts[token.id] || 0;
+  }
+  static _incrementTargetCount(token){
+    if(!game.combat || !token) return;
+    const counts = foundry.utils.duplicate(game.combat.getFlag(MODULE_ID, 'targetCounts') || {});
+    counts[token.id] = (counts[token.id] || 0) + 1;
+    game.combat.setFlag(MODULE_ID, 'targetCounts', counts).catch(()=>{});
+  }
+  static _resetTargetCounts(){
+    if(!game.combat) return;
+    game.combat.unsetFlag(MODULE_ID, 'targetCounts').catch(()=>{});
+  }
+
+  /* Deterministic pseudo-random float [0,1) from two strings */
+  static _hashFloat(s1,s2){
+    let h=0;
+    const str=(s1||'')+(s2||'');
+    for(let i=0;i<str.length;i++){ h=((h<<5)-h)+str.charCodeAt(i); h|=0; }
+    return(Math.abs(h)%10001)/10001;
   }
 
   /* ═══════════════════════════════════════════════════════════════════
@@ -574,33 +650,58 @@ class NpcAutopilot {
     const gridDist=canvas.grid.distance||5;
     const gridPx=canvas.grid.size||50;
     const distFt=this._tokenDistanceFt(selfToken, targetToken);
-    const speed=selfToken.actor?.system?.attributes?.movement?.walk||30;
-
-    // ── Ranged-only NPCs already in range ──
+    const speedFt=selfToken.actor?.system?.attributes?.movement?.walk||30;
     const range=this._getWeaponRange(weapon);
-    if(range>10 && distFt<=range && distFt>speed+15){
-      // Have ranged, target is within range but too far to reach melee — fire from here
-      return '';
+
+    // Determine ideal stand-off distance:
+    //  - Melee (range <=10 ft): close to 5 ft
+    //  - Ranged (range >10 ft): stay at just within range, but at least 5 ft if possible
+    let standOffFt;
+    if(range<=10){
+      standOffFt=5; // melee — get right next to them
+    } else {
+      // ranged — close to half range (optimal accuracy) if possible, but stay at least 5 ft away
+      standOffFt=Math.min(distFt-5, Math.max(range*0.5, Math.min(range-5, speedFt)));
+      if(standOffFt<5) standOffFt=5;
+      if(standOffFt>distFt) standOffFt=distFt-5;
+      // If already within range and range is decently usable, don't move
+      if(distFt<=range && distFt>=5 && ((distFt<=range*0.75 && distFt>=10))) return '';
     }
 
-    // ── Everyone else: close to melee (5 ft) ──
-    const meleePx=(5/gridDist)*gridPx;
+    // If already at desired stand-off range, no move
+    if(distFt<=standOffFt+2) return '';
+
+    const standOffPx=(standOffFt/gridDist)*gridPx;
+    const maxMovePx=(speedFt/gridDist)*gridPx;
+
     const dx=self.x-target.x, dy=self.y-target.y;
-    const total=Math.hypot(dx,dy);
-    if(total<=meleePx) return '';
+    const totalPx=Math.hypot(dx,dy);
+    if(totalPx<=standOffPx) return '';
 
-    const maxPx=(speed/gridDist)*gridPx;
     const angle=Math.atan2(target.y-self.y, target.x-self.x);
-    const move=Math.min(maxPx, total-meleePx);
-    if(move<=0) return '';
+    const movePx=Math.min(maxMovePx, totalPx-standOffPx);
+    if(movePx<=0) return '';
 
-    let dest=this._findFlankPosition(self, target);
-    if(!dest) dest={x:self.x+Math.cos(angle)*move, y:self.y+Math.sin(angle)*move};
+    // Try to flank first (but only if the flank point is within our move budget)
+    let dest=this._findFlankPosition(self, target, movePx);
+    if(!dest) dest={x:self.x+Math.cos(angle)*movePx, y:self.y+Math.sin(angle)*movePx};
+    else {
+      // Ensure the flank point doesn't overshoot our budget from current position
+      const flankDist=Math.hypot(dest.x-self.x, dest.y-self.y);
+      if(flankDist > movePx) dest = {x:self.x+Math.cos(angle)*movePx, y:self.y+Math.sin(angle)*movePx};
+      // Clamp destination so it doesn't overshoot target (we want stand-off, not 0 distance)
+      const destDx=dest.x-target.x, destDy=dest.y-target.y;
+      const destDistPx=Math.hypot(destDx,destDy);
+      if(destDistPx<standOffPx){
+        const shrink=(totalPx-standOffPx)/(totalPx||1);
+        dest={x:self.x+dx*shrink, y:self.y+dy*shrink};
+      }
+    }
 
     const snapped=canvas.grid.getSnappedPoint?canvas.grid.getSnappedPoint({x:dest.x,y:dest.y},{mode:CONST.GRID_SNAPPING_MODES.CENTER}):dest;
     const hit=CONFIG.Canvas.polygonBackends?.move?.testCollision?CONFIG.Canvas.polygonBackends.move.testCollision({x:self.x,y:self.y}, snapped, {type:'move',mode:'any'}):false;
     if(hit){
-      const safe=this._findSafePosition(self,snapped,maxPx);
+      const safe=this._findSafePosition(self,snapped,maxMovePx);
       if(safe){await self.update({x:safe.x,y:safe.y}); return `${selfToken.name} manoeuvres closer.`;}
       return '';
     }
@@ -611,9 +712,9 @@ class NpcAutopilot {
   static async _npcRetreat(selfToken, enemyTokens){
     if(!selfToken||!canvas?.grid)return'';
     const self=selfToken.document||selfToken;
-    const speed=selfToken.actor?.system?.attributes?.movement?.walk||30;
+    const speedFt=selfToken.actor?.system?.attributes?.movement?.walk||30;
     const gd=canvas.grid.distance||5;
-    const maxPx=(speed/gd)*canvas.grid.size;
+    const maxPx=(speedFt/gd)*canvas.grid.size;
     let ex=0,ey=0,c=0;
     for(const t of enemyTokens){
       const td=t.document||t;
@@ -634,7 +735,7 @@ class NpcAutopilot {
     return`${selfToken.name} retreats from the fray.`;
   }
 
-  static _findFlankPosition(self,target){
+  static _findFlankPosition(self,target,maxDist){
     const allies=canvas?.tokens?.placeables?.filter(t=>t.id!==self.id&&t.actor?.type==='npc');
     if(!allies?.length)return null;
     let nearest=null,minD=Infinity;
@@ -644,7 +745,11 @@ class NpcAutopilot {
     }
     if(!nearest)return null;
     const ax=nearest.document?.x||nearest.x, ay=nearest.document?.y||nearest.y;
-    return{x:target.x+(target.x-ax), y:target.y+(target.y-ay)};
+    const fx=target.x+(target.x-ax), fy=target.y+(target.y-ay);
+    const d=Math.hypot(fx-self.x, fy-self.y);
+    // Only return if the flank point is within our movement budget
+    if(maxDist!==undefined && d>maxDist) return null;
+    return{x:fx, y:fy};
   }
 
   static _findSafePosition(self,targetDest,maxDist){
