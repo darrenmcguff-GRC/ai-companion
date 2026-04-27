@@ -1,10 +1,17 @@
 const MODULE_ID = 'ai-companion';
 
 /* ═══════════════════════════════════════════════════════════════════
-   NPC AUTOPILOT v3.5.3 — Foundry VTT D&D 5e
+   NPC AUTOPILOT v3.5.4 — Foundry VTT D&D 5e
    Full-turn automation with per-NPC toggles, proper targeting,
    range checks, weapon appropriateness, native attack/damage rolling,
    and optional Midi-QOL integration.
+
+   v3.5.4 changes:
+   • Sticky target: NPC picks ONE target at turn start and commits to it.
+   • Fixed movement distance enforcement: tracks remaining move budget.
+   • Action economy overhaul: NPCs do Move + Action (multiattack/single)
+     + Bonus Action (heal/off-hand) in a single turn.
+   • Off-hand only fires when BOTH weapons are light (Two-Weapon Fighting).
    ═══════════════════════════════════════════════════════════════════ */
 
 /* ─── Settings ──────────────────────────────────────────────────── */
@@ -122,38 +129,52 @@ class NpcAutopilot {
   static async takeTurn(actor, tokenDoc) {
     if(this._busy)return; this._busy=true;
     try{
+      // Refresh token document from canvas to ensure latest position
+      const refreshed = canvas.tokens.get(tokenDoc.id);
+      if(refreshed) tokenDoc = refreshed.document || refreshed;
+
       let enemyTokens=this._findEnemyTokens(tokenDoc);
       const allyTokens =this._findAllyTokens(tokenDoc);
       const hpPct=this._getHPPct(actor);
       this._log(`${actor.name} turn start — ${enemyTokens.length} PCs, ${allyTokens.length} allies, HP ${Math.round(hpPct*100)}%`);
 
-      // Determine target and best weapon BEFORE movement so we move to correct range
+      // ── Pick target ONCE at the start of the turn (sticky) ──
       let targetToken = enemyTokens.length ? this._pickTarget(enemyTokens, tokenDoc, actor) : null;
-      this._log(`initial target: ${targetToken?.name||'none'} (${enemyTokens.length} enemies)`);
-
-      // ── Move ──
-      if(game.settings.get(MODULE_ID,'npcMovement') && tokenDoc && targetToken){
-        let move='';
-        if(hpPct<0.2&&enemyTokens.length>=2) move=await this._npcRetreat(tokenDoc, enemyTokens);
-        else {
-          const weapon=this._bestWeaponForRange(actor, this._tokenDistanceFt(tokenDoc, targetToken));
-          if(weapon) move=await this._npcMoveToTarget(tokenDoc, targetToken, weapon);
-        }
-        if(move){await this._say(`🏃 ${move}`, actor); await this._wait(400);}
-      }
-
-      // ── Re-evaluate target after movement ──
-      // Refresh tokenDoc from canvas in case coordinates updated
-      const refreshed = canvas.tokens.get(tokenDoc.id);
-      if(refreshed) tokenDoc = refreshed.document || refreshed;
-      enemyTokens=this._findEnemyTokens(tokenDoc);
-      targetToken = enemyTokens.length ? this._pickTarget(enemyTokens, tokenDoc, actor) : null;
-      this._log(`post-move target: ${targetToken?.name||'none'} (${enemyTokens.length} enemies)`);
-      // Track that we selected this target for this round
+      this._log(`locked target: ${targetToken?.name||'none'} (${enemyTokens.length} enemies)`);
       if(targetToken) this._incrementTargetCount(targetToken);
 
-      // ── Full action economy ──
-      await this._executeFullTurn(actor, tokenDoc, enemyTokens, allyTokens, hpPct, targetToken);
+      // ── Move ──
+      let moveBudgetFt = 0;
+      let moveMsg = '';
+      if(game.settings.get(MODULE_ID,'npcMovement') && tokenDoc && targetToken){
+        let moveRes={msg:'', movedFt:0};
+        if(hpPct<0.2&&enemyTokens.length>=2) moveRes=await this._npcRetreat(tokenDoc, enemyTokens);
+        else {
+          const weapon=this._bestWeaponForRange(actor, this._tokenDistanceFt(tokenDoc, targetToken));
+          if(weapon){
+            moveRes = await this._npcMoveToTarget(tokenDoc, targetToken, weapon);
+          }
+        }
+        moveMsg = moveRes.msg || '';
+        moveBudgetFt = Math.max(0, (actor.system?.attributes?.movement?.walk || 30) - (moveRes.movedFt || 0));
+        if(moveMsg){await this._say(`🏃 ${moveMsg}`, actor); await this._wait(400);}
+      }
+
+      // ── Refresh token position after movement ──
+      const movedRefreshed = canvas.tokens.get(tokenDoc.id);
+      if(movedRefreshed) tokenDoc = movedRefreshed.document || movedRefreshed;
+      enemyTokens=this._findEnemyTokens(tokenDoc);
+
+      // If our locked target died during movement, pick a new one but do NOT move again
+      let finalTarget = targetToken;
+      if(finalTarget && !enemyTokens.find(t=>t.id===finalTarget.id)){
+        finalTarget = enemyTokens.length ? this._pickTarget(enemyTokens, tokenDoc, actor) : null;
+        this._log(`target died; re-picked: ${finalTarget?.name||'none'}`);
+        if(finalTarget) this._incrementTargetCount(finalTarget);
+      }
+
+      // ── Full action economy (uses the SAME target we moved toward) ──
+      await this._executeFullTurn(actor, tokenDoc, enemyTokens, allyTokens, hpPct, finalTarget, moveBudgetFt);
 
       // ── Advance ──
       if(game.settings.get(MODULE_ID,'autoAdvance')&&game.combat?.combatant?.token?.id===tokenDoc?.id){
@@ -167,8 +188,8 @@ class NpcAutopilot {
   /* ═══════════════════════════════════════════════════════════════════
      FULL TURN — heals, attacks (multiattack, all weapons), dodge
      ═══════════════════════════════════════════════════════════════════ */
-  static async _executeFullTurn(actor, tokenDoc, enemyTokens, allyTokens, hpPct, targetToken) {
-    this._log(`_executeFullTurn: ${actor.name} — ${enemyTokens.length} enemies, HP ${Math.round(hpPct*100)}%, target=${targetToken?.name||'none'}`);
+  static async _executeFullTurn(actor, tokenDoc, enemyTokens, allyTokens, hpPct, targetToken, moveBudgetFt=0) {
+    this._log(`_executeFullTurn: ${actor.name} — ${enemyTokens.length} enemies, HP ${Math.round(hpPct*100)}%, target=${targetToken?.name||'none'}, moveLeft=${moveBudgetFt}`);
     const items = actor.items?.contents || [];
 
     // ── Bonus Action pool ──
@@ -176,24 +197,38 @@ class NpcAutopilot {
 
     // ── Bonus Action: heal self if critical ──
     if(hpPct<0.3){
-      const baHeal=this._findSpell(actor,/(healing word|mass healing word|cure wounds)/i);
+      const baHeal=this._findSpell(actor,/(healing word|cure wounds)/i);
       this._log(`heal check: ${baHeal ? baHeal.name : 'none found'}`);
       if(baHeal){ await this._useItem(actor,baHeal,actor,tokenDoc); bonusUsed=true; await this._wait(600); }
     }
 
     // ── Action: multiattack or best single attack ──
-    const didMulti=await this._doMultiattack(actor, enemyTokens, items, tokenDoc);
+    const didMulti=await this._doMultiattack(actor, enemyTokens, items, tokenDoc, moveBudgetFt);
     this._log(`multiattack returned: ${didMulti}`);
 
     if(!didMulti && targetToken){
       const dist = this._tokenDistanceFt(tokenDoc, targetToken);
       const weapon = this._bestWeaponForRange(actor, dist);
       this._log(`single attack: dist ${Math.round(dist)}ft, weapon=${weapon?.name||'none'}, range=${weapon ? this._getWeaponRange(weapon) : 'n/a'}`);
-      if(weapon && dist <= this._getWeaponRange(weapon) + 3){
-        await this._npcAttack(actor, weapon, targetToken, tokenDoc);
+      let attackWeapon = weapon;
+      let attackTarget = targetToken;
+
+      // ── If chosen weapon out of range but movement remains, try to close ──
+      if(attackWeapon && dist > this._getWeaponRange(attackWeapon) + 3 && moveBudgetFt > 0){
+        const moveRes = await this._npcMoveToTarget(tokenDoc, targetToken, attackWeapon, {maxMoveFt: moveBudgetFt});
+        if(moveRes.movedFt){
+          moveBudgetFt -= moveRes.movedFt;
+          // refresh token reference
+          const refreshed = canvas.tokens.get(tokenDoc.id);
+          if(refreshed) tokenDoc = refreshed.document || refreshed;
+        }
+      }
+      const finalDist = this._tokenDistanceFt(tokenDoc, attackTarget);
+      if(attackWeapon && finalDist <= this._getWeaponRange(attackWeapon) + 3){
+        await this._npcAttack(actor, attackWeapon, attackTarget, tokenDoc);
         await this._wait(600);
-      } else if(weapon) {
-        await this._say(`⚠️ ${actor.name} is ${Math.round(dist)} ft from ${targetToken.name}, beyond ${weapon.name}'s ${this._getWeaponRange(weapon)} ft reach.`, actor, {whisper:true});
+      } else if(attackWeapon) {
+        await this._say(`⚠️ ${actor.name} is ${Math.round(finalDist)} ft from ${attackTarget.name}, beyond ${attackWeapon.name}'s ${this._getWeaponRange(attackWeapon)} ft reach.`, actor, {whisper:true});
       } else {
         await this._say(`⚠️ ${actor.name} has no usable weapon.`, actor, {whisper:true});
       }
@@ -203,7 +238,9 @@ class NpcAutopilot {
       this._log(`multiattack succeeded; skipping single attack`);
     }
 
-    // ── Bonus Action: off-hand if applicable and not already used ──
+    // ── Bonus Action: off-hand (Two-Weapon Fighting) ──
+    // Rules: BOTH weapons must be light, attack must have been made with Action,
+    //        and bonus action has not been used yet.
     if(!bonusUsed && targetToken){
       const dist = this._tokenDistanceFt(tokenDoc, targetToken);
       const mainWeapon = this._bestWeaponForRange(actor, dist);
@@ -211,7 +248,7 @@ class NpcAutopilot {
       const mainIsLight = this._isWeaponLight(mainWeapon);
       const offIsLight = this._isWeaponLight(offHand);
       this._log(`off-hand check: offHand=${offHand?.name||'none'}, main=${mainWeapon?.name||'none'}, mainLight=${mainIsLight}, offLight=${offIsLight}`);
-      if(offHand && offHand.id !== mainWeapon?.id && offIsLight && dist <= this._getWeaponRange(offHand) + 3){
+      if(offHand && offHand.id !== mainWeapon?.id && mainIsLight && offIsLight && dist <= this._getWeaponRange(offHand) + 3){
         await this._npcAttack(actor, offHand, targetToken, tokenDoc);
         await this._wait(600);
       }
@@ -232,7 +269,7 @@ class NpcAutopilot {
   }
 
   /* ── Multiattack: parse feat description and roll ALL attacks ── */
-  static async _doMultiattack(actor, enemyTokens, items, selfToken) {
+  static async _doMultiattack(actor, enemyTokens, items, selfToken, moveBudgetFt=0) {
     const multi = items.find(i=>i.type==='feat'&&/multiattack/i.test(i.name));
     if(!multi) return false;
 
@@ -301,7 +338,7 @@ class NpcAutopilot {
 
     // Multiattack says "makes two attacks" — if pattern A gave a count, honour it;
     // otherwise default to 2 attacks with the first matched weapon.
-    let lockedTarget=this._pickTarget(enemyTokens, selfToken, actor);
+    let finalTarget=this._pickTarget(enemyTokens, selfToken, actor); // stays sticky for all attacks
     let finalAttacks = attacks;
     if(finalAttacks.length === 1 && attacks.length < 2){
       finalAttacks = [attacks[0], attacks[0]]; // two swings with same weapon
@@ -311,13 +348,28 @@ class NpcAutopilot {
     let lastWeapon=null;
     for(const weapon of finalAttacks){
       const weaponChanged = lastWeapon && lastWeapon.id !== weapon.id;
-      let target = lockedTarget;
+      let target = finalTarget;
+
+      // ── If the weapon we want to use is out of range, try to move closer ──
       if(weaponChanged){
-        const dist = this._tokenDistanceFt(selfToken, lockedTarget);
+        const dist = this._tokenDistanceFt(selfToken, finalTarget);
         const range = this._getWeaponRange(weapon);
-        if(lockedTarget && dist > range+3){
+        if(finalTarget && dist > range+3 && moveBudgetFt > 0){
+          const moveRes = await this._npcMoveToTarget(selfToken, finalTarget, weapon, {maxMoveFt: moveBudgetFt});
+          if(moveRes.movedFt){
+            moveBudgetFt -= moveRes.movedFt;
+            if(moveRes.msg) await this._say(`🏃 ${moveRes.msg}`, actor);
+            await this._wait(300);
+            // Refresh token reference after move
+            const refreshed = canvas.tokens.get(selfToken.id);
+            if(refreshed) selfToken = refreshed.document || refreshed;
+          }
+        }
+        // After (optional) move, re-check range
+        const newDist = this._tokenDistanceFt(selfToken, finalTarget);
+        if(finalTarget && newDist > this._getWeaponRange(weapon)+3){
           const inRange=enemyTokens.filter(t=>{
-            const d=this._tokenDistanceFt(selfToken,t); return d<=range+3;
+            const d=this._tokenDistanceFt(selfToken,t); return d<=this._getWeaponRange(weapon)+3;
           });
           target = inRange.length ? this._pickTarget(inRange, selfToken, actor) : this._pickTarget(enemyTokens, selfToken, actor);
         }
@@ -651,15 +703,17 @@ class NpcAutopilot {
     if(enemyTokens.length===1)return enemyTokens[0];
 
     // Build scored list: prefer wounded but spread love across targets this round
+    // Use selfToken.id (not actor.id) so linked tokens sharing an actor still diverge.
     const scored = enemyTokens.map(t=>{
       const hp = t.actor?.system?.attributes?.hp||{};
       const hpPct = (hp.value||0)/Math.max(1,hp.max||1);
       const dist = selfToken ? this._tokenDistanceFt(selfToken, t) : 30;
       const targetCount = this._getTargetedCountThisRound(t);
-      const jitter = this._hashFloat(actor?.id||selfToken?.id||'', t.id||'');
-      // Rebalanced: lower HP weight (25), higher distance weight (1.2), higher jitter (20),
-      // and a flat 18-point penalty for every time this target was already picked this round.
-      const score = (hpPct*25) + (dist*1.2) + (targetCount*18) + (jitter*20);
+      // Per-round jitter so NPCs rotate targets as the fight evolves
+      const jitter = this._hashFloat(selfToken?.id||actor?.id||'', (t.id||'')+(game.combat?.round||0));
+      // Heavily penalise targets already chosen this round (50 pts per pick)
+      // and give a 30-pt random spread so tied scores break differently per token.
+      const score = (hpPct*25) + (dist*1.2) + (targetCount*50) + (jitter*30);
       return{token:t, score};
     });
     scored.sort((a,b)=>a.score-b.score);
@@ -694,14 +748,14 @@ class NpcAutopilot {
   /* ═══════════════════════════════════════════════════════════════════
     MOVEMENT
     ═══════════════════════════════════════════════════════════════════ */
-  static async _npcMoveToTarget(selfToken, targetToken, weapon){
+  static async _npcMoveToTarget(selfToken, targetToken, weapon, opts={}){
     if(!selfToken||!targetToken||!canvas?.grid)return'';
     const self=selfToken.document||selfToken;
     const target=targetToken.document||targetToken;
     const gridDist=canvas.grid.distance||5;
     const gridPx=canvas.grid.size||50;
     const distFt=this._tokenDistanceFt(selfToken, targetToken);
-    const speedFt=selfToken.actor?.system?.attributes?.movement?.walk||30;
+    const speedFt=opts.maxMoveFt ?? selfToken.actor?.system?.attributes?.movement?.walk ?? 30;
     const range=this._getWeaponRange(weapon);
 
     // Determine ideal stand-off distance:
@@ -716,22 +770,22 @@ class NpcAutopilot {
       if(standOffFt<5) standOffFt=5;
       if(standOffFt>distFt) standOffFt=distFt-5;
       // If already within range and range is decently usable, don't move
-      if(distFt<=range && distFt>=5 && ((distFt<=range*0.75 && distFt>=10))) return '';
+      if(distFt<=range && distFt>=5 && ((distFt<=range*0.75 && distFt>=10))) return {msg:'', movedFt:0};
     }
 
     // If already at desired stand-off range, no move
-    if(distFt<=standOffFt+2) return '';
+    if(distFt<=standOffFt+2) return {msg:'', movedFt:0};
 
     const standOffPx=(standOffFt/gridDist)*gridPx;
     const maxMovePx=(speedFt/gridDist)*gridPx;
 
     const dx=self.x-target.x, dy=self.y-target.y;
     const totalPx=Math.hypot(dx,dy);
-    if(totalPx<=standOffPx) return '';
+    if(totalPx<=standOffPx) return {msg:'', movedFt:0};
 
     const angle=Math.atan2(target.y-self.y, target.x-self.x);
     const movePx=Math.min(maxMovePx, totalPx-standOffPx);
-    if(movePx<=0) return '';
+    if(movePx<=0) return {msg:'', movedFt:0};
 
     // Try to flank first (but only if the flank point is within our move budget)
     let dest=this._findFlankPosition(self, target, movePx);
@@ -751,39 +805,52 @@ class NpcAutopilot {
 
     const snapped=canvas.grid.getSnappedPoint?canvas.grid.getSnappedPoint({x:dest.x,y:dest.y},{mode:CONST.GRID_SNAPPING_MODES.CENTER}):dest;
     const hit=CONFIG.Canvas.polygonBackends?.move?.testCollision?CONFIG.Canvas.polygonBackends.move.testCollision({x:self.x,y:self.y}, snapped, {type:'move',mode:'any'}):false;
+
+    const movedFt=Math.round((Math.hypot(snapped.x-self.x, snapped.y-self.y)/gridPx)*gridDist);
+
     if(hit){
       const safe=this._findSafePosition(self,snapped,maxMovePx);
-      if(safe){await self.update({x:safe.x,y:safe.y}); return `${selfToken.name} manoeuvres closer.`;}
-      return '';
+      if(safe){
+        const safeMoved=Math.round((Math.hypot(safe.x-self.x, safe.y-self.y)/gridPx)*gridDist);
+        await self.update({x:safe.x,y:safe.y});
+        return {msg:`${selfToken.name} manoeuvres closer.`, movedFt:safeMoved};
+      }
+      return {msg:'', movedFt:0};
     }
     await self.update({x:snapped.x,y:snapped.y});
-    return `${selfToken.name} advances toward ${targetToken.name}.`;
+    return {msg:`${selfToken.name} advances toward ${targetToken.name}.`, movedFt};
   }
 
   static async _npcRetreat(selfToken, enemyTokens){
-    if(!selfToken||!canvas?.grid)return'';
+    if(!selfToken||!canvas?.grid)return {msg:'', movedFt:0};
     const self=selfToken.document||selfToken;
     const speedFt=selfToken.actor?.system?.attributes?.movement?.walk||30;
     const gd=canvas.grid.distance||5;
-    const maxPx=(speedFt/gd)*canvas.grid.size;
+    const gridPx=canvas.grid.size||50;
+    const maxPx=(speedFt/gd)*gridPx;
     let ex=0,ey=0,c=0;
     for(const t of enemyTokens){
       const td=t.document||t;
       ex+=td.x; ey+=td.y; c++;
     }
-    if(!c)return'';
+    if(!c)return {msg:'', movedFt:0};
     ex/=c; ey/=c;
     const angle=Math.atan2(self.y-ey, self.x-ex);
     const dest={x:self.x+Math.cos(angle)*maxPx, y:self.y+Math.sin(angle)*maxPx};
     const snapped=canvas.grid.getSnappedPoint?canvas.grid.getSnappedPoint({x:dest.x,y:dest.y},{mode:CONST.GRID_SNAPPING_MODES.CENTER}):dest;
+    const movedFt=Math.round((Math.hypot(snapped.x-self.x, snapped.y-self.y)/gridPx)*gd);
     const hit=CONFIG.Canvas.polygonBackends?.move?.testCollision?CONFIG.Canvas.polygonBackends.move.testCollision({x:self.x,y:self.y}, snapped, {type:'move',mode:'any'}):false;
     if(hit){
       const safe=this._findSafePosition(self,snapped,maxPx);
-      if(safe){await self.update({x:safe.x,y:safe.y});return`${selfToken.name} falls back cautiously.`;}
-      return`${selfToken.name} holds position.`;
+      if(safe){
+        const safeMoved=Math.round((Math.hypot(safe.x-self.x, safe.y-self.y)/gridPx)*gd);
+        await self.update({x:safe.x,y:safe.y});
+        return {msg:`${selfToken.name} falls back cautiously.`, movedFt:safeMoved};
+      }
+      return {msg:`${selfToken.name} holds position.`, movedFt:0};
     }
     await self.update({x:snapped.x,y:snapped.y});
-    return`${selfToken.name} retreats from the fray.`;
+    return {msg:`${selfToken.name} retreats from the fray.`, movedFt};
   }
 
   static _findFlankPosition(self,target,maxDist){
