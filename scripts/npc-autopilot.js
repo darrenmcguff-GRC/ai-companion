@@ -780,14 +780,6 @@ class NpcAutopilot {
     game.combat.unsetFlag(MODULE_ID, 'targetCounts').catch(()=>{});
   }
 
-  /* Deterministic pseudo-random float [0,1) from two strings */
-  static _hashFloat(s1,s2){
-    let h=0;
-    const str=(s1||'')+(s2||'');
-    for(let i=0;i<str.length;i++){ h=((h<<5)-h)+str.charCodeAt(i); h|=0; }
-    return(Math.abs(h)%10001)/10001;
-  }
-
   /* ═══════════════════════════════════════════════════════════════════
     MOVEMENT
     ═══════════════════════════════════════════════════════════════════ */
