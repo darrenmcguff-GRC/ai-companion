@@ -1,20 +1,19 @@
 const MODULE_ID = 'ai-companion';
 
 /* ═══════════════════════════════════════════════════════════════════
-   NPC AUTOPILOT v3.5.6 — Foundry VTT D&D 5e
+   NPC AUTOPILOT v3.5.7 — Foundry VTT D&D 5e
    Full-turn automation with per-NPC toggles, proper targeting,
    range checks, weapon appropriateness, native attack/damage rolling,
    and optional Midi-QOL integration.
 
-   v3.5.6 changes:
-   • dnd5e v5.3.2 native fast-roll: calls activity.rollAttack(config,
-     dialog={configure:false}, message) to SKIP roll dialogs entirely.
-     This makes auto-roll work WITHOUT requiring Midi-QOL.
-   • Updated _useItem() to match dnd5e v5.3+ activity.use(usage, dialog
-     {configure:false}, message) so spells/items also skip dialogs.
-   • All paths re-ordered: Midi-QOL → Native v5.3 → Legacy → Manual.
-
-   v3.5.5 changes:
+   v3.5.7 changes:
+   • Proper spread targeting: Math.random() jitter ensures each NPC picks
+     a different PC even when many NPCs share the same linked actor.
+   • True sticky target: Multiattack now honours the target chosen at the
+     start of turn instead of re-picking mid-turn.
+   • Unified movement budget: moveBudget {ft:N} object is shared across
+     movement phase, multiattack, single attack, and bonus action phases.
+     Leftover move from Phase 1 carries through the entire turn.
    • Fast-Roll Mode setting: when ON, attack & damage rolls happen
      automatically with NO prompts. When OFF, normal roll dialogs show.
    • Midi-QOL integration: temporarily bumps configSettings.autoRollAttack,
@@ -223,7 +222,8 @@ class NpcAutopilot {
     }
 
     // ── Action: multiattack or best single attack ──
-    const didMulti=await this._doMultiattack(actor, enemyTokens, items, tokenDoc, moveBudgetFt);
+    const moveBudget = { ft: moveBudgetFt };
+    const didMulti = await this._doMultiattack(actor, enemyTokens, items, tokenDoc, moveBudget, targetToken);
     this._log(`multiattack returned: ${didMulti}`);
 
     if(!didMulti && targetToken){
@@ -234,10 +234,10 @@ class NpcAutopilot {
       let attackTarget = targetToken;
 
       // ── If chosen weapon out of range but movement remains, try to close ──
-      if(attackWeapon && dist > this._getWeaponRange(attackWeapon) + 3 && moveBudgetFt > 0){
-        const moveRes = await this._npcMoveToTarget(tokenDoc, targetToken, attackWeapon, {maxMoveFt: moveBudgetFt});
+      if(attackWeapon && dist > this._getWeaponRange(attackWeapon) + 3 && moveBudget.ft > 0){
+        const moveRes = await this._npcMoveToTarget(tokenDoc, targetToken, attackWeapon, {maxMoveFt: moveBudget.ft});
         if(moveRes.movedFt){
-          moveBudgetFt -= moveRes.movedFt;
+          moveBudget.ft -= moveRes.movedFt;
           // refresh token reference
           const refreshed = canvas.tokens.get(tokenDoc.id);
           if(refreshed) tokenDoc = refreshed.document || refreshed;
@@ -289,7 +289,7 @@ class NpcAutopilot {
   }
 
   /* ── Multiattack: parse feat description and roll ALL attacks ── */
-  static async _doMultiattack(actor, enemyTokens, items, selfToken, moveBudgetFt=0) {
+  static async _doMultiattack(actor, enemyTokens, items, selfToken, moveBudget = {ft:0}, stickyTarget = null) {
     const multi = items.find(i=>i.type==='feat'&&/multiattack/i.test(i.name));
     if(!multi) return false;
 
@@ -358,7 +358,8 @@ class NpcAutopilot {
 
     // Multiattack says "makes two attacks" — if pattern A gave a count, honour it;
     // otherwise default to 2 attacks with the first matched weapon.
-    let finalTarget=this._pickTarget(enemyTokens, selfToken, actor); // stays sticky for all attacks
+    // Use the sticky target passed from takeTurn, NOT a fresh pick.
+    let finalTarget = stickyTarget;
     let finalAttacks = attacks;
     if(finalAttacks.length === 1 && attacks.length < 2){
       finalAttacks = [attacks[0], attacks[0]]; // two swings with same weapon
@@ -367,6 +368,7 @@ class NpcAutopilot {
     let attacksPerformed = 0;
     let lastWeapon=null;
     for(const weapon of finalAttacks){
+      if(!finalTarget) { lastWeapon=weapon; continue; }
       const weaponChanged = lastWeapon && lastWeapon.id !== weapon.id;
       let target = finalTarget;
 
@@ -374,10 +376,10 @@ class NpcAutopilot {
       if(weaponChanged){
         const dist = this._tokenDistanceFt(selfToken, finalTarget);
         const range = this._getWeaponRange(weapon);
-        if(finalTarget && dist > range+3 && moveBudgetFt > 0){
-          const moveRes = await this._npcMoveToTarget(selfToken, finalTarget, weapon, {maxMoveFt: moveBudgetFt});
+        if(finalTarget && dist > range+3 && moveBudget.ft > 0){
+          const moveRes = await this._npcMoveToTarget(selfToken, finalTarget, weapon, {maxMoveFt: moveBudget.ft});
           if(moveRes.movedFt){
-            moveBudgetFt -= moveRes.movedFt;
+            moveBudget.ft -= moveRes.movedFt;
             if(moveRes.msg) await this._say(`🏃 ${moveRes.msg}`, actor);
             await this._wait(300);
             // Refresh token reference after move
@@ -751,7 +753,7 @@ class NpcAutopilot {
       const dist = selfToken ? this._tokenDistanceFt(selfToken, t) : 30;
       const targetCount = this._getTargetedCountThisRound(t);
       // Per-round jitter so NPCs rotate targets as the fight evolves
-      const jitter = this._hashFloat(selfToken?.id||actor?.id||'', (t.id||'')+(game.combat?.round||0));
+      const jitter = Math.random(); // independent per-NPC random to break ties and avoid identical targeting
       // Heavily penalise targets already chosen this round (50 pts per pick)
       // and give a 30-pt random spread so tied scores break differently per token.
       const score = (hpPct*25) + (dist*1.2) + (targetCount*50) + (jitter*30);

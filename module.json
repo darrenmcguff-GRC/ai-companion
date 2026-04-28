@@ -1,8 +1,8 @@
 {
   "id": "ai-companion",
-  "title": "NPC Autopilot v3.5.6",
-  "description": "Foundry VTT NPC combat autopilot. v3.5.6: dnd5e v5.3.2 native fast-roll (dialog={configure:false}), no Midi-QOL required. v3.5.5: Fast-Roll mode setting. v3.5.4: sticky targeting, movement budget.",
-  "version": "3.5.6",
+  "title": "NPC Autopilot v3.5.7",
+  "description": "Foundry VTT NPC combat autopilot. v3.5.7: Math.random() targeting spread, true sticky target throughout multiattack, shared movement budget object across all phases. v3.5.6: dnd5e v5.3.2 native fast-roll.",
+  "version": "3.5.7",
   "authors": [
     {
       "name": "Steve"
