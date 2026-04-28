@@ -988,12 +988,10 @@ class NpcAutopilot {
     return mod+prof;
   }
   static async _say(content,actor,opts={}){
-    const msgType = CONST.CHAT_MESSAGE_TYPES?.OTHER ?? 0;
     await ChatMessage.create({
       user:game.userId,
       speaker:ChatMessage.getSpeaker({actor}),
       content:`<p>${content}</p>`,
-      type:msgType,
       whisper:opts.whisper?[game.userId]:[]
     });
   }
