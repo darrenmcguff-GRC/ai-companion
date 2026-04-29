@@ -19,13 +19,6 @@
   "styles": [
     "styles/npc-autopilot.css"
   ],
-  "languages": [
-    {
-      "lang": "en",
-      "name": "English",
-      "path": "lang/en.json"
-    }
-  ],
   "manifest": "https://raw.githubusercontent.com/darrenmcguff-GRC/ai-companion/main/module.json",
   "download": "https://raw.githubusercontent.com/darrenmcguff-GRC/ai-companion/main/ai-companion.zip",
   "url": "https://github.com/darrenmcguff-GRC/ai-companion",
