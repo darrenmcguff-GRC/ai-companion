@@ -1,9 +1,11 @@
 const MODULE_ID = 'ai-companion';
 
 /* ═══════════════════════════════════════════════════════════════════
-   NPC AUTOPILOT v3.6.0 — Foundry VTT D&D 5e
+   NPC AUTOPILOT v3.7.0 — Foundry VTT D&D 5e
    Archetype-aware tactics, spread targeting, sticky multiattack,
    shared movement budget, native attack rolls, optional Midi-QOL.
+   Adds: Spellcasting AI, Action Economy, Reactions, Legendary Actions,
+   Friendly Support, GM Controls & Overrides.
    ═══════════════════════════════════════════════════════════════════ */
 
 /* ─── Settings ──────────────────────────────────────────────────── */
@@ -16,10 +18,16 @@ Hooks.on('init', () => {
   game.settings.register(MODULE_ID, 'autoAdvance',  { scope:'world', config:true, type:Boolean, default:true,  name:'Auto-Advance Combat', hint:'Automatically end NPC turn after autopilot.' });
   game.settings.register(MODULE_ID, 'npcMovement',  { scope:'world', config:true, type:Boolean, default:true,  name:'NPC Movement', hint:'NPCs move within weapon range before attacking.' });
   game.settings.register(MODULE_ID, 'npcAutopilotFastRoll', { scope:'world', config:true, type:Boolean, default:true, name:'NPC Autopilot Fast-Roll Mode', hint:'When ON, attack & damage rolls happen automatically with NO prompts.' });
+
+  game.settings.register(MODULE_ID, 'narrativeMode',   { scope:'world', config:true, type:Boolean, default:false, name:'Narrative Mode', hint:'NPC Autopilot describes actions narratively instead of rolling.' });
+  game.settings.register(MODULE_ID, 'reactionsEnabled',{ scope:'world', config:true, type:Boolean, default:true,  name:'NPC Reactions', hint:'Enable auto-reactions like Shield and Opportunity Attacks.' });
+  game.settings.register(MODULE_ID, 'legendaryEnabled',{ scope:'world', config:true, type:Boolean, default:true,  name:'Legendary Actions', hint:'Enable legendary actions for NPCs.' });
 });
 
 Hooks.on('ready', () => {
   if (game.settings.get(MODULE_ID, 'hudOpen')) NpcAutopilot.open();
+  NpcAutopilot._setupReactions();
+  NpcAutopilot._setupLegendaryActions();
 });
 
 Hooks.on('renderTokenHUD', (hud, html) => {
@@ -35,7 +43,9 @@ Hooks.on('updateCombat', (combat, changed) => {
   if (changed.round !== undefined) NpcAutopilot._resetTargetCounts();
   const c = combat.combatant;
   if (!c?.token?.actor || c.token.actor.hasPlayerOwner) return;
+  if (c.token?.actor) c.token.actor.setFlag(MODULE_ID, 'reactionSpent', false);
   if (!NpcAutopilot.isEnabled(c.token.actor)) return;
+  if (NpcAutopilot._isPaused(c.token.actor)) return;
   NpcAutopilot.takeTurn(c.token.actor, c.token);
 });
 
@@ -44,32 +54,31 @@ Hooks.on('updateCombat', (combat, changed) => {
    ═══════════════════════════════════════════════════════════════════ */
 class NpcAutopilot {
   static _busy = false;
+  static _pausedActorId = null;
+  static _lastCombatantId = null;
 
   /* ── static tactic catalogue ── */
   static _TACTICS = {
-    // Monster type archetypes
-    assassin:     { preferWounded: true,  prefersMelee: false, positioning: 'mid',        retreatThreshold: 0.10, healAllyThreshold: 0 },
-    bruiser:      { preferWounded: false, prefersMelee: true,  positioning: 'charge',     retreatThreshold: 0.00, healAllyThreshold: 0 },
-    controller:   { preferWounded: false, prefersMelee: false, positioning: 'hang_back',  retreatThreshold: 0.20, healAllyThreshold: 0 },
-    flying:       { preferWounded: false, prefersMelee: false, positioning: 'hang_back',  retreatThreshold: 0.15, healAllyThreshold: 0 },
-    healer:       { preferWounded: false, prefersMelee: false, positioning: 'mid',        retreatThreshold: 0.25, healAllyThreshold: 0.40, bonusHealAlly: true },
-    skirmisher:   { preferWounded: false, prefersMelee: true,  positioning: 'flank',      retreatThreshold: 0.15, healAllyThreshold: 0 },
-    sniper:       { preferWounded: true,  prefersMelee: false, positioning: 'hang_back',  retreatThreshold: 0.10, healAllyThreshold: 0 },
-    // Player-class archetypes (NPCs with class levels)
-    barbarian:    { preferWounded: false, prefersMelee: true,  positioning: 'charge',     retreatThreshold: 0.05, healAllyThreshold: 0 },
-    bard:         { preferWounded: false, prefersMelee: false, positioning: 'mid',        retreatThreshold: 0.20, healAllyThreshold: 0.30 },
-    cleric:       { preferWounded: false, prefersMelee: false, positioning: 'mid',        retreatThreshold: 0.20, healAllyThreshold: 0.40, bonusHealAlly: true },
-    druid:        { preferWounded: false, prefersMelee: false, positioning: 'mid',        retreatThreshold: 0.20, healAllyThreshold: 0.30 },
-    fighter:      { preferWounded: false, prefersMelee: true,  positioning: 'charge',     retreatThreshold: 0.10, healAllyThreshold: 0 },
-    monk:         { preferWounded: false, prefersMelee: true,  positioning: 'flank',      retreatThreshold: 0.15, healAllyThreshold: 0 },
-    paladin:      { preferWounded: false, prefersMelee: true,  positioning: 'charge',     retreatThreshold: 0.10, healAllyThreshold: 0.30 },
-    ranger:       { preferWounded: true,  prefersMelee: false, positioning: 'mid',        retreatThreshold: 0.15, healAllyThreshold: 0 },
-    rogue:        { preferWounded: true,  prefersMelee: true,  positioning: 'flank',      retreatThreshold: 0.15, healAllyThreshold: 0 },
-    sorcerer:     { preferWounded: false, prefersMelee: false, positioning: 'hang_back',  retreatThreshold: 0.25, healAllyThreshold: 0 },
-    warlock:      { preferWounded: true,  prefersMelee: false, positioning: 'hang_back',  retreatThreshold: 0.20, healAllyThreshold: 0 },
-    wizard:       { preferWounded: false, prefersMelee: false, positioning: 'hang_back',  retreatThreshold: 0.30, healAllyThreshold: 0 },
-    // Fallback
-    default:      { preferWounded: false, prefersMelee: false, positioning: 'charge',     retreatThreshold: 0.20, healAllyThreshold: 0 },
+    assassin:     { preferWounded: true,  prefersMelee: false, positioning: 'mid',        retreatThreshold: 0.10, healAllyThreshold: 0, spellPreference: ['damage','mobility','control'] },
+    bruiser:      { preferWounded: false, prefersMelee: true,  positioning: 'charge',     retreatThreshold: 0.00, healAllyThreshold: 0, spellPreference: ['damage','control','buff'] },
+    controller:   { preferWounded: false, prefersMelee: false, positioning: 'hang_back',  retreatThreshold: 0.20, healAllyThreshold: 0, spellPreference: ['control','damage','buff'] },
+    flying:       { preferWounded: false, prefersMelee: false, positioning: 'hang_back',  retreatThreshold: 0.15, healAllyThreshold: 0, spellPreference: ['damage','mobility','control'] },
+    healer:       { preferWounded: false, prefersMelee: false, positioning: 'mid',        retreatThreshold: 0.25, healAllyThreshold: 0.40, bonusHealAlly: true, spellPreference: ['heal','buff','control'] },
+    skirmisher:   { preferWounded: false, prefersMelee: true,  positioning: 'flank',      retreatThreshold: 0.15, healAllyThreshold: 0, spellPreference: ['damage','mobility','control'] },
+    sniper:       { preferWounded: true,  prefersMelee: false, positioning: 'hang_back',  retreatThreshold: 0.10, healAllyThreshold: 0, spellPreference: ['damage','control','mobility'] },
+    barbarian:    { preferWounded: false, prefersMelee: true,  positioning: 'charge',     retreatThreshold: 0.05, healAllyThreshold: 0, spellPreference: ['damage','buff','control'] },
+    bard:         { preferWounded: false, prefersMelee: false, positioning: 'mid',        retreatThreshold: 0.20, healAllyThreshold: 0.30, spellPreference: ['buff','heal','control','damage'] },
+    cleric:       { preferWounded: false, prefersMelee: false, positioning: 'mid',        retreatThreshold: 0.20, healAllyThreshold: 0.40, bonusHealAlly: true, spellPreference: ['heal','buff','damage','control'] },
+    druid:        { preferWounded: false, prefersMelee: false, positioning: 'mid',        retreatThreshold: 0.20, healAllyThreshold: 0.30, spellPreference: ['heal','control','damage','buff'] },
+    fighter:      { preferWounded: false, prefersMelee: true,  positioning: 'charge',     retreatThreshold: 0.10, healAllyThreshold: 0, spellPreference: ['damage','control','buff'] },
+    monk:         { preferWounded: false, prefersMelee: true,  positioning: 'flank',      retreatThreshold: 0.15, healAllyThreshold: 0, spellPreference: ['damage','control','mobility'] },
+    paladin:      { preferWounded: false, prefersMelee: true,  positioning: 'charge',     retreatThreshold: 0.10, healAllyThreshold: 0.30, spellPreference: ['damage','heal','buff','smite'] },
+    ranger:       { preferWounded: true,  prefersMelee: false, positioning: 'mid',        retreatThreshold: 0.15, healAllyThreshold: 0, spellPreference: ['damage','control','mobility'] },
+    rogue:        { preferWounded: true,  prefersMelee: true,  positioning: 'flank',      retreatThreshold: 0.15, healAllyThreshold: 0, spellPreference: ['damage','mobility','control'] },
+    sorcerer:     { preferWounded: false, prefersMelee: false, positioning: 'hang_back',  retreatThreshold: 0.25, healAllyThreshold: 0, spellPreference: ['damage','control','buff'] },
+    warlock:      { preferWounded: true,  prefersMelee: false, positioning: 'hang_back',  retreatThreshold: 0.20, healAllyThreshold: 0, spellPreference: ['damage','control','buff'] },
+    wizard:       { preferWounded: false, prefersMelee: false, positioning: 'hang_back',  retreatThreshold: 0.30, healAllyThreshold: 0, spellPreference: ['damage','control','buff'] },
+    default:      { preferWounded: false, prefersMelee: false, positioning: 'charge',     retreatThreshold: 0.20, healAllyThreshold: 0, spellPreference: ['damage','control'] },
   };
 
   static isEnabled(actor) {
@@ -139,7 +148,7 @@ class NpcAutopilot {
     return { arch, ...t };
   }
 
-  /* ── Panel (unchanged) ── */
+  /* ── Panel ── */
   static async open() {
     let $el = $('#npc-ap-panel');
     if (!$el.length) {
@@ -159,8 +168,12 @@ class NpcAutopilot {
         const a=$(this).data('ap-action');
         if(a==='toggle-global'){ game.settings.set(MODULE_ID,'npcAutopilot',!game.settings.get(MODULE_ID,'npcAutopilot')); NpcAutopilot._renderPanel(); }
         if(a==='toggle-fast'){ game.settings.set(MODULE_ID,'npcAutopilotFastRoll',!game.settings.get(MODULE_ID,'npcAutopilotFastRoll')); NpcAutopilot._renderPanel(); }
+        if(a==='toggle-narrative'){ game.settings.set(MODULE_ID,'narrativeMode',!game.settings.get(MODULE_ID,'narrativeMode')); NpcAutopilot._renderPanel(); }
+        if(a==='toggle-reactions'){ game.settings.set(MODULE_ID,'reactionsEnabled',!game.settings.get(MODULE_ID,'reactionsEnabled')); NpcAutopilot._renderPanel(); }
+        if(a==='toggle-legendary'){ game.settings.set(MODULE_ID,'legendaryEnabled',!game.settings.get(MODULE_ID,'legendaryEnabled')); NpcAutopilot._renderPanel(); }
         if(a==='manual-turn'){ const c=game.combat?.combatant; if(c?.token?.actor) NpcAutopilot.takeTurn(c.token.actor,c.token); }
         if(a==='toggle-npc'){ const id=$(this).data('actor-id'); const a2=game.actors.get(id); if(a2) NpcAutopilot.setEnabled(a2, $(this).is(':checked')); }
+        if(a==='override-npc'){ const id=$(this).data('actor-id'); const a2=game.actors.get(id); if(a2) NpcAutopilot._openActorOverride(a2); }
       });
     }
     await game.settings.set(MODULE_ID,'hudOpen',true);
@@ -174,13 +187,19 @@ class NpcAutopilot {
     const $sc=$('#npc-ap-panel .npc-ap-scroll'); if(!$sc.length)return;
     const globalOn=game.settings.get(MODULE_ID,'npcAutopilot');
     const fastRoll=game.settings.get(MODULE_ID,'npcAutopilotFastRoll');
+    const narrative=game.settings.get(MODULE_ID,'narrativeMode');
+    const reactions=game.settings.get(MODULE_ID,'reactionsEnabled');
+    const legendary=game.settings.get(MODULE_ID,'legendaryEnabled');
     const combat=game.combat; const active=combat?.started;
     const cur=combat?.combatant; const ct=cur?.token; const ca=ct?.actor; const isNPC=ca&&!ca.hasPlayerOwner;
     const currentArch = ca ? this._detectArchetype(ca) : '';
     let html=`<div class="npc-ap-status-row">
       <span class="npc-ap-toggle ${globalOn?'on':'off'}" data-ap-action="toggle-global"><i class="fas fa-power-off"></i> ${globalOn?'ON':'OFF'}</span>
       <span class="npc-ap-toggle ${fastRoll?'on':'off'}" data-ap-action="toggle-fast"><i class="fas fa-forward"></i> ${fastRoll?'FAST':'SLOW'}</span>
-      <span class="npc-ap-combat-status">${active?'🎲 Round '+(combat.round||1)+', Turn '+((combat.turn||0)+1):'No combat'}</span></div>`;
+      <span class="npc-ap-toggle ${narrative?'on':'off'}" data-ap-action="toggle-narrative"><i class="fas fa-book"></i> ${narrative?'NARR':'STD'}</span>
+      <span class="npc-ap-toggle ${reactions?'on':'off'}" data-ap-action="toggle-reactions"><i class="fas fa-shield-alt"></i> ${reactions?'REACT':'NONE'}</span>
+      <span class="npc-ap-toggle ${legendary?'on':'off'}" data-ap-action="toggle-legendary"><i class="fas fa-dragon"></i> ${legendary?'LEG':'NONE'}</span></div>`;
+    html+=`<div class="npc-ap-combat-status" style="text-align:center;padding:4px;font-size:12px;">${active?'🎲 Round '+(combat.round||1)+', Turn '+((combat.turn||0)+1):'No combat'}</div>`;
     if(ct){ const hp=ca?.system?.attributes?.hp||{}; const p=Math.round((hp.value||0)/(hp.max||1)*100); const c=p>50?'#4ade80':p>25?'#facc15':'#f87171';
       html+=`<div class="npc-ap-card"><img src="${ct.texture?.src||ca?.img||'icons/svg/mystery-man.svg'}">
         <div class="npc-ap-info"><div class="npc-ap-name">${ct.name||ca?.name||'?'}</div>
@@ -189,11 +208,12 @@ class NpcAutopilot {
         ${isNPC&&globalOn?'<div class="npc-ap-badge">🤖</div>':''}</div>`; }
     if(active){ const npcs=combat.combatants.filter(c=>c.token?.actor&&!c.token.actor.hasPlayerOwner); if(npcs.length){
       html+=`<div class="npc-ap-list"><div class="npc-ap-section">NPCs in Combat (${npcs.length})</div>`;
-      for(const c of npcs){ const a=c.token.actor; const en=this.isEnabled(a); const h=a?.system?.attributes?.hp||{}; const p=Math.round((h.value||0)/(h.max||1)*100); const col=p>50?'#4ade80':p>25?'#facc15':'#f87171'; const arch=this._detectArchetype(a);
-        html+=`<div class="npc-ap-item ${c.token?.id===ct?.id?'current':''}">
+      for(const c of npcs){ const a=c.token.actor; const en=this.isEnabled(a); const h=a?.system?.attributes?.hp||{}; const p=Math.round((h.value||0)/(h.max||1)*100); const col=p>50?'#4ade80':p>25?'#facc15':'#f87171'; const arch=this._detectArchetype(a); const paused=this._pausedActorId===a.id;
+        html+=`<div class="npc-ap-item ${c.token?.id===ct?.id?'current':''} ${paused?'paused':''}">
           <input type="checkbox" class="npc-ap-check" data-ap-action="toggle-npc" data-actor-id="${a.id}" ${en?'checked':''} title="Toggle autopilot for ${a.name}">
+          <i class="fas fa-cog npc-ap-gear" data-ap-action="override-npc" data-actor-id="${a.id}" style="cursor:pointer;margin:0 4px;" title="Override"></i>
           <img src="${c.token?.texture?.src||a?.img||'icons/svg/mystery-man.svg'}">
-          <div class="npc-ap-item-name">${c.name}${arch!=='default'?' <small style="opacity:.7">('+arch+')</small>':''}</div>
+          <div class="npc-ap-item-name">${paused?'⏸️ ':''}${c.name}${arch!=='default'?' <small style="opacity:.7">('+arch+')</small>':''}</div>
           <div class="npc-ap-item-hpbar"><div style="width:${p}%;background:${col}"></div></div>
           <div class="npc-ap-item-hp" style="color:${col}">${p}%</div></div>`; }
       html+=`</div>`; }}
@@ -207,25 +227,36 @@ class NpcAutopilot {
   static async takeTurn(actor, tokenDoc) {
     if(this._busy)return; this._busy=true;
     try{
+      if(this._isPaused(actor)){ this._busy=false; return; }
+      await actor.setFlag(MODULE_ID, 'reactionSpent', false);
       const refreshed = canvas.tokens.get(tokenDoc.id);
       if(refreshed) tokenDoc = refreshed.document || refreshed;
 
       const tactics = this._getTactics(actor);
+      const ov = this._getOverrides(actor);
       let enemyTokens=this._findEnemyTokens(tokenDoc);
       const allyTokens =this._findAllyTokens(tokenDoc);
       const hpPct=this._getHPPct(actor);
+
+      if(ov.blacklist?.length) enemyTokens = enemyTokens.filter(t=>!ov.blacklist.includes(t.id));
+
       this._log(`${actor.name} turn start — ${enemyTokens.length} PCs, ${allyTokens.length} allies, HP ${Math.round(hpPct*100)}%, arch=${tactics.arch}`);
 
       let targetToken = enemyTokens.length ? this._pickTarget(enemyTokens, tokenDoc, actor, tactics) : null;
+      if(ov.forceTarget){
+        const forced = canvas.tokens.get(ov.forceTarget);
+        if(forced && enemyTokens.find(t=>t.id===forced.id)) targetToken = forced;
+      }
       this._log(`locked target: ${targetToken?.name||'none'} (${enemyTokens.length} enemies)`);
       if(targetToken) this._incrementTargetCount(targetToken);
 
       let moveBudgetFt = 0;
       let moveMsg = '';
-      if(game.settings.get(MODULE_ID,'npcMovement') && tokenDoc && targetToken){
+      if(game.settings.get(MODULE_ID,'npcMovement') && tokenDoc && targetToken && !ov.noMove){
         let moveRes={msg:'', movedFt:0};
         if(hpPct < tactics.retreatThreshold && enemyTokens.length>=2){
           moveRes=await this._npcRetreat(tokenDoc, enemyTokens);
+          if(moveRes.movedFt>0) moveRes.msg=`${tokenDoc.name} Disengages and retreats from danger.`;
         } else {
           const weapon=this._bestWeaponForRange(actor, this._tokenDistanceFt(tokenDoc, targetToken), {prefersMelee:tactics.prefersMelee});
           if(weapon){
@@ -240,6 +271,7 @@ class NpcAutopilot {
       const movedRefreshed = canvas.tokens.get(tokenDoc.id);
       if(movedRefreshed) tokenDoc = movedRefreshed.document || movedRefreshed;
       enemyTokens=this._findEnemyTokens(tokenDoc);
+      if(ov.blacklist?.length) enemyTokens = enemyTokens.filter(t=>!ov.blacklist.includes(t.id));
 
       let finalTarget = targetToken;
       if(finalTarget && !enemyTokens.find(t=>t.id===finalTarget.id)){
@@ -248,7 +280,7 @@ class NpcAutopilot {
         if(finalTarget) this._incrementTargetCount(finalTarget);
       }
 
-      await this._executeFullTurn(actor, tokenDoc, enemyTokens, allyTokens, hpPct, finalTarget, moveBudgetFt, tactics);
+      await this._executeFullTurn(actor, tokenDoc, enemyTokens, allyTokens, hpPct, finalTarget, moveBudgetFt, tactics, ov);
 
       if(game.settings.get(MODULE_ID,'autoAdvance')&&game.combat?.combatant?.token?.id===tokenDoc?.id){
         setTimeout(()=>game.combat?.nextTurn?.(), 800);
@@ -259,60 +291,121 @@ class NpcAutopilot {
   }
 
   /* ═══════════════════════════════════════════════════════════════════
-     FULL TURN — heals, attacks, dodge (tactic-aware)
+     FULL TURN — spellcasting, action economy, heals, attacks, dodge
      ═══════════════════════════════════════════════════════════════════ */
-  static async _executeFullTurn(actor, tokenDoc, enemyTokens, allyTokens, hpPct, targetToken, moveBudgetFt=0, tactics) {
+  static async _executeFullTurn(actor, tokenDoc, enemyTokens, allyTokens, hpPct, targetToken, moveBudgetFt=0, tactics, overrides={}) {
     this._log(`_executeFullTurn: ${actor.name} — ${enemyTokens.length} enemies, HP ${Math.round(hpPct*100)}%, target=${targetToken?.name||'none'}, moveLeft=${moveBudgetFt}, arch=${tactics?.arch||'default'}`);
     const items = actor.items?.contents || [];
     const moveBudget = { ft: moveBudgetFt };
     let bonusUsed = false;
+    let actionUsed = false;
+    const ov = overrides || {};
+
+    if(ov.forceArch && this._TACTICS[ov.forceArch]){
+      Object.assign(tactics, this._TACTICS[ov.forceArch]);
+      tactics.arch = ov.forceArch;
+    }
+    if(ov.forceTarget){
+      const forced = canvas.tokens.get(ov.forceTarget);
+      if(forced && !forced.actor?.hasPlayerOwner) targetToken = forced;
+    }
+
+    // ── Spellcasting (before weapon attacks) ──
+    if(!ov.noSpells){
+      const bestSpell = await this._pickBestSpell(actor, enemyTokens, allyTokens, tokenDoc, tactics, moveBudget);
+      if(bestSpell?.spell){
+        await this._castSpell(bestSpell.spell, bestSpell.target, tokenDoc);
+        actionUsed = true;
+        await this._wait(600);
+        if(this._isAoESpell(bestSpell.spell)){
+          enemyTokens = this._findEnemyTokens(tokenDoc);
+          if(ov.blacklist?.length) enemyTokens = enemyTokens.filter(t=>!ov.blacklist.includes(t.id));
+        }
+      }
+    }
+
+    // ── Action Economy (only if action not already used by spell) ──
+    if(!actionUsed){
+      // Dash when target far away
+      if(targetToken && !ov.noMove){
+        const dist = this._tokenDistanceFt(tokenDoc, targetToken);
+        const speed = actor.system?.attributes?.movement?.walk || 30;
+        if(dist > speed + 10){
+          const dashRes = await this._actionDash(actor, tokenDoc, targetToken, moveBudget);
+          if(dashRes.movedFt > 0){
+            moveBudget.ft = Math.max(0, moveBudget.ft - dashRes.movedFt);
+            actionUsed = true;
+            await this._wait(400);
+            const refreshed = canvas.tokens.get(tokenDoc.id);
+            if(refreshed) tokenDoc = refreshed.document || refreshed;
+            enemyTokens = this._findEnemyTokens(tokenDoc);
+            if(ov.blacklist?.length) enemyTokens = enemyTokens.filter(t=>!ov.blacklist.includes(t.id));
+          }
+        }
+      }
+    }
+
+    // Shove/Grapple for controllers/bruisers when adjacent
+    if(!actionUsed && targetToken && !ov.noGrapple){
+      const dist = this._tokenDistanceFt(tokenDoc, targetToken);
+      const isBruiser = ['controller','bruiser','fighter','barbarian','monk'].includes(tactics?.arch);
+      if(isBruiser && dist <= 7){
+        const grappled = await this._doShoveOrGrapple(actor, tokenDoc, targetToken);
+        if(grappled) actionUsed = true;
+        await this._wait(400);
+      }
+    }
 
     // ── Bonus Action: heal ally first (healer archetypes) ──
-    if((tactics?.healAllyThreshold > 0) && allyTokens.length){
+    if((tactics?.healAllyThreshold > 0) && allyTokens.length && !bonusUsed){
       const woundedAlly = allyTokens
         .map(t=>{const h=t.actor?.system?.attributes?.hp||{}; return{token:t, pct:(h.value||0)/Math.max(1,h.max||1)};})
         .filter(a=>a.pct < tactics.healAllyThreshold)
         .sort((a,b)=>a.pct-b.pct)[0];
       if(woundedAlly){
-        const baHeal = this._findSpell(actor,/(healing word|cure wounds|lesser restoration)/i);
+        const baHeal = this._findBestHealSpell(actor) || this._findSpell(actor,/(healing word|cure wounds|lesser restoration)/i);
         if(baHeal){ await this._useItem(actor, baHeal, woundedAlly.token.actor, tokenDoc); bonusUsed=true; await this._wait(600); }
       }
     }
 
     // ── Bonus Action: heal self if critical and no ally healed ──
     if(!bonusUsed && hpPct < 0.3){
-      const baHeal=this._findSpell(actor,/(healing word|cure wounds)/i);
+      const baHeal = this._findBestHealSpell(actor) || this._findSpell(actor,/(healing word|cure wounds)/i);
       if(baHeal){ await this._useItem(actor,baHeal,actor,tokenDoc); bonusUsed=true; await this._wait(600); }
     }
 
     // ── Action: multiattack or best single attack ──
-    const didMulti = await this._doMultiattack(actor, enemyTokens, items, tokenDoc, moveBudget, targetToken, tactics);
-    this._log(`multiattack returned: ${didMulti}`);
+    if(!actionUsed){
+      const didMulti = await this._doMultiattack(actor, enemyTokens, items, tokenDoc, moveBudget, targetToken, tactics);
+      this._log(`multiattack returned: ${didMulti}`);
+      if(didMulti) actionUsed = true;
 
-    if(!didMulti && targetToken){
-      const dist = this._tokenDistanceFt(tokenDoc, targetToken);
-      const weapon = this._bestWeaponForRange(actor, dist, {prefersMelee:tactics?.prefersMelee});
-      this._log(`single attack: dist ${Math.round(dist)}ft, weapon=${weapon?.name||'none'}`);
-      let attackWeapon = weapon;
-      if(attackWeapon && dist > this._getWeaponRange(attackWeapon) + 3 && moveBudget.ft > 0){
-        const moveRes = await this._npcMoveToTarget(tokenDoc, targetToken, attackWeapon, {maxMoveFt: moveBudget.ft, tactics});
-        if(moveRes.movedFt){
-          moveBudget.ft -= moveRes.movedFt;
-          const refreshed = canvas.tokens.get(tokenDoc.id);
-          if(refreshed) tokenDoc = refreshed.document || refreshed;
+      if(!didMulti && targetToken){
+        const dist = this._tokenDistanceFt(tokenDoc, targetToken);
+        const weapon = this._bestWeaponForRange(actor, dist, {prefersMelee:tactics?.prefersMelee});
+        this._log(`single attack: dist ${Math.round(dist)}ft, weapon=${weapon?.name||'none'}`);
+        let attackWeapon = weapon;
+        if(attackWeapon && dist > this._getWeaponRange(attackWeapon) + 3 && moveBudget.ft > 0 && !ov.noMove){
+          const moveRes = await this._npcMoveToTarget(tokenDoc, targetToken, attackWeapon, {maxMoveFt: moveBudget.ft, tactics});
+          if(moveRes.movedFt){
+            moveBudget.ft -= moveRes.movedFt;
+            const refreshed = canvas.tokens.get(tokenDoc.id);
+            if(refreshed) tokenDoc = refreshed.document || refreshed;
+          }
         }
-      }
-      const finalDist = this._tokenDistanceFt(tokenDoc, targetToken);
-      if(attackWeapon && finalDist <= this._getWeaponRange(attackWeapon) + 3){
-        await this._npcAttack(actor, attackWeapon, targetToken, tokenDoc);
-        await this._wait(600);
-      } else if(attackWeapon) {
-        await this._say(`⚠️ ${actor.name} is ${Math.round(finalDist)} ft from ${targetToken.name}, beyond ${attackWeapon.name}'s reach.`, actor, {whisper:true});
+        const finalDist = this._tokenDistanceFt(tokenDoc, targetToken);
+        if(attackWeapon && finalDist <= this._getWeaponRange(attackWeapon) + 3){
+          await this._npcAttack(actor, attackWeapon, targetToken, tokenDoc);
+          actionUsed = true;
+          await this._wait(600);
+        } else if(attackWeapon) {
+          await this._say(`⚠️ ${actor.name} is ${Math.round(finalDist)} ft from ${targetToken.name}, beyond ${attackWeapon.name}'s reach.`, actor, {whisper:true});
+        }
       }
     }
 
     // ── Bonus Action: off-hand (Two-Weapon Fighting) ──
-    if(!bonusUsed && targetToken){
+    if(!bonusUsed && !ov.noOffhand && targetToken){
       const dist = this._tokenDistanceFt(tokenDoc, targetToken);
       const mainWeapon = this._bestWeaponForRange(actor, dist, {prefersMelee:tactics?.prefersMelee});
       const offHand = this._bestWeaponForRange(actor, dist, {excludeMain:true, prefersMelee:tactics?.prefersMelee});
@@ -322,13 +415,21 @@ class NpcAutopilot {
       }
     }
 
-    // ── Dodge / Defensive Action ──
-    if(!didMulti && !targetToken){
-      if(tactics?.positioning === 'hang_back'){
-        // Casters already staying back — no need to dodge loudly
-      } else if(hpPct < (tactics?.retreatThreshold || 0.20)){
-        await this._say(`🛡️ ${actor.name} takes the **Dodge** action.`, actor);
-      }
+    // ── Dodge when wounded and no target or no action used ──
+    if(!actionUsed && hpPct < (tactics?.retreatThreshold || 0.20) && (!targetToken || tactics?.positioning !== 'charge')){
+      await this._doDodge(actor);
+      actionUsed = true;
+    }
+
+    // ── Help action when near ally and no enemies ──
+    if(!actionUsed && !enemyTokens.length && allyTokens.length){
+      await this._doHelp(actor, tokenDoc, allyTokens);
+      actionUsed = true;
+    }
+
+    // ── Object interaction: quaff potion randomly ──
+    if(Math.random() < 0.15 && hpPct < 0.5){
+      await this._quaffPotion(actor);
     }
   }
 
@@ -702,10 +803,8 @@ class NpcAutopilot {
       const jitter = Math.random();
       let score = (targetCount*50) + (dist*1.2) + (jitter*30);
       if(preferWounded){
-        // heavily favour wounded targets so NPCs finish off PCs
         score -= (1 - hpPct)*80;
       } else {
-        // standard spread targeting
         score += (hpPct*25);
       }
       return{token:t, score};
@@ -744,23 +843,18 @@ class NpcAutopilot {
     const range=this._getWeaponRange(weapon);
     const tactics = opts.tactics || {};
 
-    // Stand-off based on positioning tactic
     let standOffFt;
     const pos = tactics.positioning || 'charge';
     if(range<=10){
-      standOffFt = 5; // melee always closes to 5 ft
+      standOffFt = 5;
     } else {
       if(pos==='hang_back'){
-        // Casters / snipers — stay at max effective range but within weapon
         standOffFt = Math.max(15, Math.min(range - 5, distFt - 5));
       } else if(pos==='mid'){
-        // Bards, clerics, druids — mid-range for spells and backup melee
         standOffFt = Math.max(10, Math.min(range*0.5, distFt - 5));
       } else if(pos==='flank'){
-        // Rogues, skirmishers — close but not necessarily charging to adjacent
         standOffFt = Math.max(5, Math.min(range, distFt - 5));
       } else {
-        // charge / default — close as much as possible
         standOffFt=Math.min(distFt-5, Math.max(range*0.5, Math.min(range-5, speedFt)));
         if(standOffFt<5) standOffFt=5;
       }
@@ -925,6 +1019,355 @@ class NpcAutopilot {
   }
   static _log(m){console.log(`%c[NPC Autopilot] ${m}`,'color:#8b5cf6;font-weight:bold');}
   static _wait(ms){return new Promise(r=>setTimeout(r,ms));}
+
+  /* ═══════════════════════════════════════════════════════════════════
+     GM OVERRIDES
+     ═══════════════════════════════════════════════════════════════════ */
+  static _getOverrides(actor) {
+    const ov = actor.getFlag(MODULE_ID, 'apOverrides') || {};
+    return {
+      noSpells: !!ov.noSpells,
+      noMove: !!ov.noMove,
+      noGrapple: !!ov.noGrapple,
+      noOffhand: !!ov.noOffhand,
+      forceArch: ov.forceArch || null,
+      forceTarget: ov.forceTarget || null,
+      blacklist: Array.isArray(ov.blacklist) ? ov.blacklist : [],
+    };
+  }
+  static _isPaused(actor) {
+    return this._pausedActorId === actor.id;
+  }
+
+  static async _openActorOverride(actor) {
+    const ov = this._getOverrides(actor);
+    const arches = Object.keys(this._TACTICS);
+    const currentArch = this._detectArchetype(actor);
+    const isPaused = this._isPaused(actor);
+    const token = canvas.tokens.placeables.find(t=>t.actor?.id===actor.id);
+    const enemies = this._findEnemyTokens(token);
+    const content = `
+      <form>
+        <div class="form-group"><label>Forced Archetype</label><select name="forceArch"><option value="">Auto (${currentArch})</option>${arches.map(a=>`<option value="${a}" ${ov.forceArch===a?'selected':''}>${a}</option>`).join('')}</select></div>
+        <div class="form-group"><label>Force Target</label><select name="forceTarget"><option value="">Auto</option>${enemies.map(e=>`<option value="${e.id}" ${ov.forceTarget===e.id?'selected':''}>${e.name}</option>`).join('')}</select></div>
+        <div class="form-group"><label>Blacklist Tokens (comma-separated IDs)</label><input type="text" name="blacklist" value="${ov.blacklist.join(',')}"></div>
+        <hr>
+        <div class="form-group"><label><input type="checkbox" name="noSpells" ${ov.noSpells?'checked':''}> No Spells</label></div>
+        <div class="form-group"><label><input type="checkbox" name="noMove" ${ov.noMove?'checked':''}> No Movement</label></div>
+        <div class="form-group"><label><input type="checkbox" name="noGrapple" ${ov.noGrapple?'checked':''}> No Grapple/Shove</label></div>
+        <div class="form-group"><label><input type="checkbox" name="noOffhand" ${ov.noOffhand?'checked':''}> No Off-Hand</label></div>
+      </form>
+    `;
+    new Dialog({
+      title: `Override: ${actor.name}`,
+      content,
+      buttons: {
+        save: {
+          icon: '<i class="fas fa-save"></i>',
+          label: 'Save',
+          callback: async (html) => {
+            const form = html[0].querySelector('form');
+            const data = {
+              forceArch: form.forceArch.value || null,
+              forceTarget: form.forceTarget.value || null,
+              blacklist: form.blacklist.value.split(',').map(s=>s.trim()).filter(Boolean),
+              noSpells: form.noSpells.checked,
+              noMove: form.noMove.checked,
+              noGrapple: form.noGrapple.checked,
+              noOffhand: form.noOffhand.checked,
+            };
+            await actor.setFlag(MODULE_ID, 'apOverrides', data);
+            ui.notifications.info(`Overrides saved for ${actor.name}.`);
+            this._renderPanel();
+          }
+        },
+        pause: {
+          icon: '<i class="fas fa-pause"></i>',
+          label: isPaused ? 'Resume' : 'Pause',
+          callback: async () => {
+            this._pausedActorId = isPaused ? null : actor.id;
+            ui.notifications.info(`${actor.name} autopilot ${isPaused?'resumed':'paused'}.`);
+            this._renderPanel();
+          }
+        },
+        close: { icon: '<i class="fas fa-times"></i>', label: 'Close' }
+      },
+      default: 'save'
+    }).render(true);
+  }
+
+  /* ═══════════════════════════════════════════════════════════════════
+     SPELLCASTING AI
+     ═══════════════════════════════════════════════════════════════════ */
+  static async _pickBestSpell(actor, enemyTokens, allyTokens, selfToken, tactics, moveBudget) {
+    const items = actor.items?.contents || [];
+    const prefs = tactics?.spellPreference || ['damage','control'];
+    const spells = items.filter(i=>i.type==='spell' && this._spellAvailable(actor, i));
+    if(!spells.length) return null;
+
+    let best = null, bestScore = -Infinity;
+    for(const spell of spells){
+      const name = spell.name.toLowerCase();
+      let categories = [];
+      if(/heal|cure|restoration|aid|prayer of healing/i.test(name)) categories.push('heal');
+      else if(/shield|mage armor|blur|mirror image|invisibility|fly|haste|bless|aid|enhance ability|heroism|protection/i.test(name)) categories.push('buff');
+      else if(/fireball|lightning bolt|cone of cold|shatter|thunderwave|burning hands|ice knife|scorching ray|magic missile/i.test(name)) categories.push('damage');
+      else if(/hold|stun|paralyze|slow|web|hypnotic|confusion|fear|charm|polymorph|banishment|counterspell|silence|black tentacles|gravity well/i.test(name)) categories.push('control');
+      else if(/misty step|dimension door|teleport|fly|haste|jump|expeditious retreat|dash/i.test(name)) categories.push('mobility');
+      else if(/inflict|smite|divine|blight|disintegrate|finger of death/i.test(name)) categories.push('smite');
+      else if(/cantrip|ray of frost|fire bolt|shocking grasp|chill touch|eldritch blast|vicious mockery|sacred flame|toll the dead|minor illusion|prestidigitation|mage hand/i.test(name) || spell.system?.level === 0) categories.push('cantrip');
+      else categories.push('damage');
+
+      if(spell.system?.components?.concentration && actor.effects?.some(e=>e.label?.toLowerCase()?.includes('concentrating'))) continue;
+
+      const prefIndex = Math.min(...categories.map(c=>prefs.indexOf(c)).filter(i=>i>=0));
+      if(prefIndex === Infinity) continue;
+
+      const range = this._getSpellRange(spell);
+      let target = null, score = 0;
+      if(categories.includes('heal')){
+        target = this._findRescueTarget(allyTokens) || this._findBestBuffTarget(selfToken, allyTokens);
+        if(target) score = 80 - prefIndex*20;
+      } else if(categories.includes('buff')){
+        target = this._findBestBuffTarget(selfToken, allyTokens) || selfToken;
+        if(target) score = 70 - prefIndex*20;
+      } else if(categories.includes('damage') || categories.includes('smite') || categories.includes('cantrip')){
+        if(this._isAoESpell(spell)){
+          target = this._findBestAoETarget(selfToken, enemyTokens, spell);
+          if(target) score = 100 - prefIndex*20 + (target.cluster||0)*10;
+        } else {
+          target = this._pickTarget(enemyTokens, selfToken, actor, tactics);
+          if(target){
+            const dist = this._tokenDistanceFt(selfToken, target);
+            if(dist <= range + 3) score = 90 - prefIndex*20 - dist*0.5;
+          }
+        }
+      } else if(categories.includes('control')){
+        target = this._pickTarget(enemyTokens, selfToken, actor, tactics);
+        if(target){
+          const dist = this._tokenDistanceFt(selfToken, target);
+          if(dist <= range + 3) score = 85 - prefIndex*20 - dist*0.5;
+        }
+      } else if(categories.includes('mobility')){
+        if(moveBudget.ft <= 0 && enemyTokens.length >= 2) {
+          target = selfToken;
+          score = 60 - prefIndex*20;
+        }
+      }
+
+      if(target && score > bestScore){
+        bestScore = score;
+        best = {spell, target};
+      }
+    }
+    return best;
+  }
+
+  static _spellAvailable(actor, spell) {
+    if(spell.system?.level === 0) return true;
+    const prep = spell.system?.preparation;
+    if(prep?.mode === 'prepared' && !prep?.prepared) return false;
+    const slots = actor.system?.spells;
+    const level = spell.system?.level || 1;
+    const slotKey = 'spell'+level;
+    if(slots?.[slotKey]?.value > 0) return true;
+    if(slots?.[slotKey]?.max > 0 && slots?.[slotKey]?.value === 0) return false;
+    if(['innate','pact','always'].includes(prep?.mode)) return true;
+    if(spell.system?.uses?.value > 0) return true;
+    return true;
+  }
+
+  static async _castSpell(spell, target, selfToken) {
+    if(!spell) return;
+    this._log(`Casting ${spell.name} on ${target?.name||'self'}`);
+    if(target?.actor){
+      await this._useItem(selfToken?.actor, spell, target.actor, selfToken);
+    } else {
+      await this._useItem(selfToken?.actor, spell, null, selfToken);
+    }
+  }
+
+  static _getSpellRange(spell) {
+    const sys = spell.system || {};
+    if(sys.range?.value) return parseInt(sys.range.value) || 30;
+    if(sys.target?.value) return parseInt(sys.target.value)*5 || 30;
+    return 30;
+  }
+
+  static _findBestHealSpell(actor) {
+    const rx = /(healing word|cure wounds|lesser restoration|prayer of healing|mass cure wounds|regenerate|heal)/i;
+    const spells = (actor.items?.contents||[]).filter(i=>i.type==='spell' && rx.test(i.name) && this._spellAvailable(actor, i));
+    if(!spells.length) return null;
+    return spells.sort((a,b)=>(b.system?.level||0)-(a.system?.level||0))[0];
+  }
+
+  static _findBestAoETarget(selfToken, enemyTokens, spell) {
+    if(!selfToken || !enemyTokens.length) return null;
+    const radiusFt = (spell.system?.target?.value||0)*5 || 20;
+    const range = this._getSpellRange(spell);
+    let best = null, bestCount = 0;
+    for(const t of enemyTokens){
+      const d = this._tokenDistanceFt(selfToken, t);
+      if(d > range + 3) continue;
+      const cluster = enemyTokens.filter(e=>e.id!==t.id && this._tokenDistanceFt(t,e) <= radiusFt).length;
+      if(cluster > bestCount){
+        bestCount = cluster;
+        best = t;
+      }
+    }
+    if(best) best.cluster = bestCount;
+    return best;
+  }
+
+  static _isAoESpell(spell) {
+    const shape = (spell.system?.target?.type || '').toLowerCase();
+    return ['sphere','cone','cube','cylinder','line','radius','square','wall'].includes(shape);
+  }
+
+  static _findBestBuffTarget(selfToken, allyTokens) {
+    if(!allyTokens?.length) return null;
+    const scored = allyTokens.map(t=>{
+      const a = t.actor;
+      const str = a?.system?.abilities?.str?.mod||0;
+      const dex = a?.system?.abilities?.dex?.mod||0;
+      const atk = a?.system?.attributes?.attackBonus||0;
+      return {token:t, score: Math.max(str,dex)+atk};
+    }).sort((a,b)=>b.score-a.score);
+    return scored[0]?.token || null;
+  }
+
+  static _findRescueTarget(allyTokens) {
+    return allyTokens.find(t=>{
+      const hp = t.actor?.system?.attributes?.hp||{};
+      return (hp.value||0)===0 && (hp.max||0)>0;
+    }) || null;
+  }
+
+  static _canSneakAttack(selfToken, targetToken) {
+    if(!selfToken || !targetToken) return false;
+    const dist = this._tokenDistanceFt(selfToken, targetToken);
+    if(dist > 7) return false;
+    const adjacentAlly = canvas.tokens.placeables.find(t=>{
+      if(t.id===selfToken.id) return false;
+      if(t.actor?.hasPlayerOwner) return false;
+      const d = this._tokenDistanceFt(t, targetToken);
+      return d <= 7;
+    });
+    return !!adjacentAlly;
+  }
+
+  /* ═══════════════════════════════════════════════════════════════════
+     ACTION ECONOMY HELPERS
+     ═══════════════════════════════════════════════════════════════════ */
+  static async _actionDash(actor, tokenDoc, targetToken, moveBudget) {
+    const speed = actor.system?.attributes?.movement?.walk || 30;
+    await this._say(`🏃 ${actor.name} takes the **Dash** action.`, actor);
+    const moveRes = await this._npcMoveToTarget(tokenDoc, targetToken, {name:'Dash'}, {maxMoveFt: speed});
+    return { movedFt: moveRes.movedFt || 0 };
+  }
+
+  static async _doShoveOrGrapple(actor, tokenDoc, targetToken) {
+    const items = actor.items?.contents||[];
+    const grapple = items.find(i=>i.type==='feat' && /grapple/i.test(i.name));
+    const shove = items.find(i=>i.type==='feat' && /shove/i.test(i.name));
+    const feat = grapple || shove;
+    if(feat){
+      await this._useItem(actor, feat, targetToken.actor, tokenDoc);
+      return true;
+    }
+    await this._say(`🤼 ${actor.name} attempts to ${grapple?'grapple':'shove'} ${targetToken.name}!`, actor);
+    return true;
+  }
+
+  static async _doDodge(actor) {
+    await this._say(`🛡️ ${actor.name} takes the **Dodge** action.`, actor);
+  }
+
+  static async _doHelp(actor, tokenDoc, allyTokens) {
+    const ally = allyTokens[0];
+    if(!ally) return;
+    await this._say(`🤝 ${actor.name} takes the **Help** action for ${ally.name}.`, actor);
+  }
+
+  static async _quaffPotion(actor) {
+    const potion = actor.items.find(i=>/(potion of healing|healing potion|greater healing|superior healing|supreme healing)/i.test(i.name));
+    if(potion){
+      await this._useItem(actor, potion, actor, null);
+      await this._say(`🧪 ${actor.name} quaffs a ${potion.name}.`, actor);
+    }
+  }
+
+  /* ═══════════════════════════════════════════════════════════════════
+     REACTIONS
+     ═══════════════════════════════════════════════════════════════════ */
+  static _setupReactions() {
+    if(!game.user.isGM) return;
+    Hooks.on('midi-qol.preAttackRoll', async (workflow) => {
+      if(!game.settings.get(MODULE_ID,'reactionsEnabled')) return;
+      const actor = workflow.actor;
+      if(!actor || actor.hasPlayerOwner) return;
+      if(actor.getFlag(MODULE_ID,'reactionSpent')) return;
+      if(!this.isEnabled(actor)) return;
+      await this._checkReaction_Shield(workflow);
+    });
+    Hooks.on('updateToken', (tokenDoc, change) => {
+      if(!game.settings.get(MODULE_ID,'reactionsEnabled')) return;
+      // Opportunity Attack / Sentinel placeholder
+    });
+  }
+
+  static async _checkReaction_Shield(workflow) {
+    const targetActor = workflow.targets?.first()?.actor;
+    if(!targetActor || targetActor.hasPlayerOwner) return;
+    if(targetActor.getFlag(MODULE_ID,'reactionSpent')) return;
+    const attackTotal = workflow.attackTotal;
+    const targetAC = targetActor.system?.attributes?.ac?.value || 10;
+    if(attackTotal === undefined || attackTotal < targetAC) return;
+    const shield = targetActor.items.find(i=>i.type==='spell' && i.name==='Shield');
+    if(!shield || !this._spellAvailable(targetActor, shield)) return;
+    targetActor.setFlag(MODULE_ID,'reactionSpent', true);
+    await this._useItem(targetActor, shield, null, null);
+    await this._say(`🛡️ ${targetActor.name} casts **Shield** as a reaction!`, targetActor);
+  }
+
+  /* ═══════════════════════════════════════════════════════════════════
+     LEGENDARY ACTIONS
+     ═══════════════════════════════════════════════════════════════════ */
+  static _setupLegendaryActions() {
+    if(!game.user.isGM) return;
+    Hooks.on('updateCombat', (combat, changed) => {
+      if(!game.settings.get(MODULE_ID,'legendaryEnabled')) return;
+      if(!combat?.started) return;
+      if(changed.turn === undefined && changed.round === undefined) return;
+      const prevId = this._lastCombatantId;
+      this._lastCombatantId = combat.combatant?.id;
+      if(!prevId) return;
+      const prev = combat.combatants.get(prevId);
+      if(!prev?.token?.actor || !prev.token.actor.hasPlayerOwner) return;
+      this._legendaryHandler(combat, prev);
+    });
+  }
+
+  static async _legendaryHandler(combat, prevCombatant) {
+    for(const c of combat.combatants){
+      const a = c.token?.actor;
+      if(!a || a.hasPlayerOwner) continue;
+      if(!this.isEnabled(a)) continue;
+      const legendary = a.items.filter(i=>i.type==='feat' && /legendary/i.test(i.name));
+      if(!legendary.length) continue;
+      for(const feat of legendary){
+        if(feat.system?.uses?.value === 0) continue;
+        const enemies = this._findEnemyTokens(c.token);
+        if(!enemies.length) continue;
+        const target = this._pickTarget(enemies, c.token, a, this._getTactics(a));
+        if(!target) continue;
+        await this._useItem(a, feat, target.actor, c.token);
+        await this._say(`⚔️ ${a.name} uses **${feat.name}**!`, a);
+        await this._wait(500);
+        break;
+      }
+    }
+  }
 }
 
 globalThis.NpcAutopilot=NpcAutopilot;

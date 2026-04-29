@@ -1,8 +1,8 @@
 {
   "id": "ai-companion",
-  "title": "NPC Autopilot v3.6.0",
-  "description": "Foundry VTT NPC combat autopilot. v3.6.0: Archetype-aware tactics (assassin, bruiser, controller, healer, skirmisher, sniper, caster, flying), tactical target priority, positioning (charge/flank/mid/hang_back), ally healing, and class/monster trait detection. v3.5.8: ChatMessage fix.",
-  "version": "3.6.0",
+  "title": "NPC Autopilot v3.7.0",
+  "description": "Foundry VTT NPC combat autopilot. v3.7.0: Spellcasting AI (pick best spell by archetype, AoE clustering, concentration respect), Action Economy (Dash, Dodge, Shove, Grapple, Help, object interaction), Auto-Reactions (Shield, Opportunity Attack), Auto-Legendary Actions, Friendly Support (buff priority, rescue, Sneak Attack combos), GM Controls (narrative mode, per-NPC override panel, blacklist, pause/resume). v3.6.0: Archetype-aware tactics.",
+  "version": "3.7.0",
   "authors": [
     {
       "name": "Steve"
