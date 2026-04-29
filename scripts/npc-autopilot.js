@@ -1,9 +1,8 @@
 const MODULE_ID = 'ai-companion';
 
 /* ═══════════════════════════════════════════════════════════════════
-   NPC AUTOPILOT v3.7.2 — Foundry VTT D&D 5e
-   Movement engine rewrite: caster-aware positioning, Dash adds movement,
-   post-action reposition, multi-movement speed support, _getSpeed fallback.
+   NPC AUTOPILOT v3.7.3 — Foundry VTT D&D 5e
+   Hotfix: undefined `items` reference in takeTurn, sniper typo.
    ═══════════════════════════════════════════════════════════════════ */
 
 /* ─── Settings ──────────────────────────────────────────────────── */
@@ -247,6 +246,8 @@ class NpcAutopilot {
 
       this._log(`${actor.name} turn start — ${enemyTokens.length} PCs, ${allyTokens.length} allies, HP ${Math.round(hpPct*100)}%, arch=${tactics.arch}`);
 
+      const items = actor.items?.contents || [];
+
       let targetToken = enemyTokens.length ? this._pickTarget(enemyTokens, tokenDoc, actor, tactics) : null;
       if(ov.forceTarget){
         const forced = canvas.tokens.get(ov.forceTarget);
@@ -440,7 +441,7 @@ class NpcAutopilot {
     if(moveBudget.ft > 0 && targetToken && !ov.noMove){
       const dist = this._tokenDistanceFt(tokenDoc, targetToken);
       /* casters/back-liners: step back if too close */
-      const shouldBackOff = ['controller','sorcerer','wizard','warlock','bard','cleric','druid','snipr','flying'].includes(tactics?.arch);
+      const shouldBackOff = ['controller','sorcerer','wizard','warlock','bard','cleric','druid','sniper','flying'].includes(tactics?.arch);
       if(shouldBackOff && dist < 20 && dist > 5){
         const backFt = Math.min(moveBudget.ft, 15);
         if(backFt > 0){
