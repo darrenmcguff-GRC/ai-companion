@@ -1,24 +1,12 @@
 {
   "id": "ai-companion",
   "title": "AI Companion (NPC Autopilot)",
-  "description": "Foundry VTT NPC combat autopilot. v3.7.1: Fixed concentration detection (dnd5e v4 properties), innate/limited spell consumption, per-turn cast tracker, uses-before-always priority. v3.7.0: Spellcasting AI, Action Economy, Reactions, Legendary Actions. v3.6.0: Archetype-aware tactics.",
-  "version": "3.7.1",
-  "authors": [
-    {
-      "name": "Steve"
-    }
-  ],
-  "compatibility": {
-    "minimum": "13",
-    "verified": "14",
-    "maximum": "14"
-  },
-  "esmodules": [
-    "scripts/npc-autopilot.js"
-  ],
-  "styles": [
-    "styles/npc-autopilot.css"
-  ],
+  "description": "Foundry VTT NPC combat autopilot. v3.7.2: Movement engine rewrite — caster-aware positioning, Dash adds movement, post-action reposition, multi-movement speed support. v3.7.1: Fixed concentration detection, innate/limited spell consumption, per-turn cast tracker. v3.6.0: Archetype-aware tactics.",
+  "version": "3.7.2",
+  "authors": [{"name":"Steve"}],
+  "compatibility": {"minimum":"13","verified":"14","maximum":"14"},
+  "esmodules": ["scripts/npc-autopilot.js"],
+  "styles": ["styles/npc-autopilot.css"],
   "manifest": "https://raw.githubusercontent.com/darrenmcguff-GRC/ai-companion/main/module.json",
   "download": "https://raw.githubusercontent.com/darrenmcguff-GRC/ai-companion/main/ai-companion.zip",
   "url": "https://github.com/darrenmcguff-GRC/ai-companion",

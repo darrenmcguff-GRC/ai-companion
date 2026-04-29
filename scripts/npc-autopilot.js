@@ -1,9 +1,9 @@
 const MODULE_ID = 'ai-companion';
 
 /* ═══════════════════════════════════════════════════════════════════
-   NPC AUTOPILOT v3.7.1 — Foundry VTT D&D 5e
-   Spellcasting hotfix: concentration detection, limited-use consumption,
-   per-turn cast tracker, uses-before-always ordering.
+   NPC AUTOPILOT v3.7.2 — Foundry VTT D&D 5e
+   Movement engine rewrite: caster-aware positioning, Dash adds movement,
+   post-action reposition, multi-movement speed support, _getSpeed fallback.
    ═══════════════════════════════════════════════════════════════════ */
 
 /* ─── Settings ──────────────────────────────────────────────────── */
@@ -263,13 +263,28 @@ class NpcAutopilot {
           moveRes=await this._npcRetreat(tokenDoc, enemyTokens);
           if(moveRes.movedFt>0) moveRes.msg=`${tokenDoc.name} Disengages and retreats from danger.`;
         } else {
-          const weapon=this._bestWeaponForRange(actor, this._tokenDistanceFt(tokenDoc, targetToken), {prefersMelee:tactics.prefersMelee});
-          if(weapon){
-            moveRes = await this._npcMoveToTarget(tokenDoc, targetToken, weapon, {tactics});
+          /* ── caster-aware movement ── */
+          let moveTool, desiredRange;
+          const hasRangedSpell = items.some(i=>i.type==='spell' && this._spellAvailable(actor,i) && this._getSpellRange(i) > 20);
+          const isCaster = ['controller','sorcerer','wizard','warlock','bard','druid','cleric','flying'].includes(tactics?.arch);
+          if(isCaster && hasRangedSpell){
+            const availSpells = items.filter(i=>i.type==='spell' && this._spellAvailable(actor,i));
+            let bestSpellRange = 0;
+            for(const sp of availSpells){
+              const sr = this._getSpellRange(sp);
+              if(sr > bestSpellRange && sr <= 120) bestSpellRange = sr;
+            }
+            desiredRange = bestSpellRange > 0 ? bestSpellRange : 60;
+            moveTool = { name:'spell', system:{range:{value:desiredRange},target:{}} };
+          } else {
+            moveTool = this._bestWeaponForRange(actor, this._tokenDistanceFt(tokenDoc, targetToken), {prefersMelee:tactics.prefersMelee});
+          }
+          if(moveTool){
+            moveRes = await this._npcMoveToTarget(tokenDoc, targetToken, moveTool, {tactics, desiredRange});
           }
         }
         moveMsg = moveRes.msg || '';
-        moveBudgetFt = Math.max(0, (actor.system?.attributes?.movement?.walk || 30) - (moveRes.movedFt || 0));
+        moveBudgetFt = Math.max(0, this._getSpeed(actor) - (moveRes.movedFt || 0));
         if(moveMsg){await this._say(`🏃 ${moveMsg}`, actor); await this._wait(400);}
       }
 
@@ -331,14 +346,15 @@ class NpcAutopilot {
 
     // ── Action Economy (only if action not already used by spell) ──
     if(!actionUsed){
-      // Dash when target far away
+      // Dash when target is out of total reach even after remaining movement
       if(targetToken && !ov.noMove){
         const dist = this._tokenDistanceFt(tokenDoc, targetToken);
-        const speed = actor.system?.attributes?.movement?.walk || 30;
-        if(dist > speed + 10){
+        const speed = this._getSpeed(actor);
+        const totalReach = moveBudget.ft + speed; /* action move + remaining budget */
+        if(dist > totalReach && dist > speed + 10){
           const dashRes = await this._actionDash(actor, tokenDoc, targetToken, moveBudget);
           if(dashRes.movedFt > 0){
-            moveBudget.ft = Math.max(0, moveBudget.ft - dashRes.movedFt);
+            moveBudget.ft = Math.max(0, moveBudget.ft + dashRes.movedFt); /* Dash adds speed to budget */
             actionUsed = true;
             await this._wait(400);
             const refreshed = canvas.tokens.get(tokenDoc.id);
@@ -417,6 +433,36 @@ class NpcAutopilot {
       if(offHand && offHand.id !== mainWeapon?.id && this._isWeaponLight(mainWeapon) && this._isWeaponLight(offHand) && dist <= this._getWeaponRange(offHand) + 3){
         await this._npcAttack(actor, offHand, targetToken, tokenDoc);
         await this._wait(600);
+      }
+    }
+
+    // ── Post-Action Movement: reposition if movement remains ──
+    if(moveBudget.ft > 0 && targetToken && !ov.noMove){
+      const dist = this._tokenDistanceFt(tokenDoc, targetToken);
+      /* casters/back-liners: step back if too close */
+      const shouldBackOff = ['controller','sorcerer','wizard','warlock','bard','cleric','druid','snipr','flying'].includes(tactics?.arch);
+      if(shouldBackOff && dist < 20 && dist > 5){
+        const backFt = Math.min(moveBudget.ft, 15);
+        if(backFt > 0){
+          const backRes = await this._npcMoveAway(tokenDoc, targetToken, backFt);
+          if(backRes.movedFt > 0){
+            moveBudget.ft -= backRes.movedFt;
+            await this._say(`🏃 ${backRes.msg}`, actor);
+            await this._wait(300);
+          }
+        }
+      }
+      /* melee fighters: close to 5 ft if further than needed */
+      else if(!shouldBackOff && dist > 7 && dist <= 30){
+        const weapon = this._bestWeaponForRange(actor, dist, {prefersMelee:true});
+        if(weapon && dist > this._getWeaponRange(weapon) + 3){
+          const closeRes = await this._npcMoveToTarget(tokenDoc, targetToken, weapon, {maxMoveFt: moveBudget.ft, tactics});
+          if(closeRes.movedFt > 0){
+            moveBudget.ft -= closeRes.movedFt;
+            await this._say(`🏃 ${closeRes.msg}`, actor);
+            await this._wait(300);
+          }
+        }
       }
     }
 
@@ -548,6 +594,16 @@ class NpcAutopilot {
   }
 
   static _wordToNum(w){ const map={one:1,two:2,three:3,four:4,five:5}; const n=parseInt(w); return isNaN(n)?(map[w?.toLowerCase()]||1):n; }
+
+  static _getSpeed(actor) {
+    const mov = actor.system?.attributes?.movement || {};
+    if(mov.fly) return mov.fly;
+    if(mov.swim) return mov.swim;
+    if(mov.climb) return mov.climb;
+    if(mov.walk) return mov.walk;
+    if(mov.burrow) return mov.burrow;
+    return 30;
+  }
 
   /* ═══════════════════════════════════════════════════════════════════
      ATTACK / USE ITEM
@@ -863,10 +919,13 @@ class NpcAutopilot {
     const speedFt=opts.maxMoveFt ?? selfToken.actor?.system?.attributes?.movement?.walk ?? 30;
     const range=this._getWeaponRange(weapon);
     const tactics = opts.tactics || {};
+    const desiredRange = opts.desiredRange; /* caster override */
 
     let standOffFt;
     const pos = tactics.positioning || 'charge';
-    if(range<=10){
+    if(desiredRange){
+      standOffFt = Math.max(5, desiredRange * 0.6); /* close enough to cast, far enough to avoid melee */
+    } else if(range<=10){
       standOffFt = 5;
     } else {
       if(pos==='hang_back'){
@@ -932,7 +991,7 @@ class NpcAutopilot {
   static async _npcRetreat(selfToken, enemyTokens){
     if(!selfToken||!canvas?.grid)return {msg:'', movedFt:0};
     const self=selfToken.document||selfToken;
-    const speedFt=selfToken.actor?.system?.attributes?.movement?.walk||30;
+    const speedFt=this._getSpeed(selfToken.actor);
     const gd=canvas.grid.distance||5;
     const gridPx=canvas.grid.size||50;
     const maxPx=(speedFt/gd)*gridPx;
@@ -954,8 +1013,30 @@ class NpcAutopilot {
     return {msg:`${selfToken.name} retreats from the fray.`, movedFt};
   }
 
+  static async _npcMoveAway(selfToken, targetToken, maxFt){
+    if(!selfToken||!targetToken||!canvas?.grid) return {msg:'', movedFt:0};
+    const self=selfToken.document||selfToken;
+    const target=targetToken.document||targetToken;
+    const gd=canvas.grid.distance||5;
+    const gridPx=canvas.grid.size||50;
+    const maxPx=(maxFt/gd)*gridPx;
+
+    const dx=self.x-target.x, dy=self.y-target.y;
+    const distPx=Math.hypot(dx,dy)||1;
+    const angle=Math.atan2(dy,dx);
+    const movePx=Math.min(maxPx, distPx-gridPx); /* don't go past target position */
+    if(movePx<=0) return {msg:'', movedFt:0};
+
+    const dest={x:self.x+Math.cos(angle)*movePx, y:self.y+Math.sin(angle)*movePx};
+    const snapped=canvas.grid.getSnappedPoint?canvas.grid.getSnappedPoint({x:dest.x,y:dest.y},{mode:CONST.GRID_SNAPPING_MODES.CENTER}):dest;
+    const movedFt=Math.round((Math.hypot(snapped.x-self.x, snapped.y-self.y)/gridPx)*gd);
+    if(movedFt<=0) return {msg:'', movedFt:0};
+
+    await self.update({x:snapped.x,y:snapped.y});
+    return {msg:`${selfToken.name} withdraws to safer range.`, movedFt};
+  }
+
   static _findFlankPosition(self,target,maxDist){
-    const allies=canvas?.tokens?.placeables?.filter(t=>t.id!==self.id&&t.actor?.type==='npc');
     if(!allies?.length)return null;
     let nearest=null,minD=Infinity;
     for(const a of allies){
