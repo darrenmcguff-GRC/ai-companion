@@ -1,11 +1,9 @@
 const MODULE_ID = 'ai-companion';
 
 /* ═══════════════════════════════════════════════════════════════════
-   NPC AUTOPILOT v3.7.0 — Foundry VTT D&D 5e
-   Archetype-aware tactics, spread targeting, sticky multiattack,
-   shared movement budget, native attack rolls, optional Midi-QOL.
-   Adds: Spellcasting AI, Action Economy, Reactions, Legendary Actions,
-   Friendly Support, GM Controls & Overrides.
+   NPC AUTOPILOT v3.7.1 — Foundry VTT D&D 5e
+   Spellcasting hotfix: concentration detection, limited-use consumption,
+   per-turn cast tracker, uses-before-always ordering.
    ═══════════════════════════════════════════════════════════════════ */
 
 /* ─── Settings ──────────────────────────────────────────────────── */
@@ -234,6 +232,7 @@ class NpcAutopilot {
     if(this._busy)return; this._busy=true;
     try{
       if(this._isPaused(actor)){ this._busy=false; return; }
+      await this._resetCastTracker(actor);
       await actor.setFlag(MODULE_ID, 'reactionSpent', false);
       const refreshed = canvas.tokens.get(tokenDoc.id);
       if(refreshed) tokenDoc = refreshed.document || refreshed;
@@ -682,6 +681,22 @@ class NpcAutopilot {
   static async _useItem(actor, item, targetToken, selfToken) {
     if(!item) return;
     this._log(`_useItem: ${actor.name} → ${item.name}`);
+
+    /* consume spell if applicable */
+    if(item.type === 'spell'){
+      const level = item.system?.level ?? 0;
+      if(level > 0){
+        const slots = actor.system?.spells;
+        const slotKey = 'spell'+level;
+        if(slots?.[slotKey]?.value > 0){
+          await actor.update({ [`system.spells.${slotKey}.value`]: Math.max(0, slots[slotKey].value - 1) });
+        }
+      }
+      if(typeof item.system?.uses?.value === 'number' && item.system.uses.value > 0){
+        await item.update({ 'system.uses.value': Math.max(0, item.system.uses.value - 1) });
+      }
+      this._trackSpellCast(actor, item);
+    }
     const oldTargets = Array.from(game.user.targets).map(t=>t.id);
     const oldControlled = Array.from(canvas.tokens.controlled).map(t=>t.id);
 
@@ -1112,8 +1127,12 @@ class NpcAutopilot {
     if(!spells.length) return null;
 
     let best = null, bestScore = -Infinity;
+    const alreadyCast = new Set(this._spellsCastThisTurn(actor));
     for(const spell of spells){
       const name = spell.name.toLowerCase();
+      const level = spell.system?.level ?? 0;
+      /* skip duplicates of leveled/limited spells */
+      if(level > 0 && alreadyCast.has(spell.id)) continue;
       let categories = [];
       if(/heal|cure|restoration|aid|prayer of healing/i.test(name)) categories.push('heal');
       else if(/shield|mage armor|blur|mirror image|invisibility|fly|haste|bless|aid|enhance ability|heroism|protection/i.test(name)) categories.push('buff');
@@ -1124,7 +1143,10 @@ class NpcAutopilot {
       else if(/cantrip|ray of frost|fire bolt|shocking grasp|chill touch|eldritch blast|vicious mockery|sacred flame|toll the dead|minor illusion|prestidigitation|mage hand/i.test(name) || spell.system?.level === 0) categories.push('cantrip');
       else categories.push('damage');
 
-      if(spell.system?.components?.concentration && actor.effects?.some(e=>e.label?.toLowerCase()?.includes('concentrating'))) continue;
+      const concProps = spell.system?.properties || [];
+      const isConcSpell = Array.isArray(concProps) ? concProps.includes('concentration') :
+                         (concProps instanceof Set ? concProps.has('concentration') : spell.system?.components?.concentration);
+      if(isConcSpell && actor.effects?.some(e=>(e.name||e.label||'').toLowerCase().includes('concentrating'))) continue;
 
       const prefIndex = Math.min(...categories.map(c=>prefs.indexOf(c)).filter(i=>i>=0));
       if(prefIndex === Infinity) continue;
@@ -1170,16 +1192,22 @@ class NpcAutopilot {
   }
 
   static _spellAvailable(actor, spell) {
-    if(spell.system?.level === 0) return true;
+    const level = spell.system?.level ?? 0;
+    if(level === 0) return true;
     const prep = spell.system?.preparation;
     if(prep?.mode === 'prepared' && !prep?.prepared) return false;
+    /* check uses before anything else */
+    if(typeof spell.system?.uses?.value === 'number'){
+      if(spell.system.uses.value > 0) return true;
+      if(spell.system.uses.max > 0 && spell.system.uses.value === 0) return false;
+    }
+    if(prep?.mode === 'always') return true;
     const slots = actor.system?.spells;
-    const level = spell.system?.level || 1;
-    const slotKey = 'spell'+level;
-    if(slots?.[slotKey]?.value > 0) return true;
-    if(slots?.[slotKey]?.max > 0 && slots?.[slotKey]?.value === 0) return false;
-    if(['innate','pact','always'].includes(prep?.mode)) return true;
-    if(spell.system?.uses?.value > 0) return true;
+    if(slots){
+      const slotKey = level === 0 ? 'spell0' : ('spell'+level);
+      if(slots?.[slotKey]?.value > 0) return true;
+      if(slots?.[slotKey]?.max > 0 && slots?.[slotKey]?.value === 0) return false;
+    }
     return true;
   }
 
@@ -1260,6 +1288,23 @@ class NpcAutopilot {
       return d <= 7;
     });
     return !!adjacentAlly;
+  }
+
+  /* ═══════════════════════════════════════════════════════════════════
+     SPELL TRACKING (prevents recasting same limited spell on same turn)
+     ═══════════════════════════════════════════════════════════════════ */
+  static _trackSpellCast(actor, spell) {
+    const cast = actor.getFlag(MODULE_ID, 'spellsCastThisTurn') || [];
+    cast.push(spell.id);
+    actor.setFlag(MODULE_ID, 'spellsCastThisTurn', cast).catch(()=>{});
+  }
+
+  static _spellsCastThisTurn(actor) {
+    return actor.getFlag(MODULE_ID, 'spellsCastThisTurn') || [];
+  }
+
+  static async _resetCastTracker(actor) {
+    await actor.setFlag(MODULE_ID, 'spellsCastThisTurn', []).catch(()=>{});
   }
 
   /* ═══════════════════════════════════════════════════════════════════
