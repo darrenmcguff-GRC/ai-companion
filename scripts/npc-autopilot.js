@@ -1,9 +1,9 @@
 const MODULE_ID = 'ai-companion';
 
 /* ═══════════════════════════════════════════════════════════════════
-   NPC AUTOPILOT v3.7.4 — Foundry VTT D&D 5e
-   Hotfix: _safeUpdate prevents stale document crashes, fixed _findFlankPosition
-   missing allies variable, robust token referencing after movement.
+   NPC AUTOPILOT v3.7.5 — Foundry VTT D&D 5e
+   Hotfix: ranged weapons excluded at ≤5 ft (disadvantage); thrown weapons still allowed.
+   Previous: _safeUpdate prevents stale document crashes; _findFlankPosition allies fix.
    ═══════════════════════════════════════════════════════════════════ */
 
 /* ─── Settings ──────────────────────────────────────────────────── */
@@ -497,6 +497,14 @@ class NpcAutopilot {
     return false;
   }
 
+  static _isWeaponThrown(weapon){
+    if(!weapon)return false;
+    const props=weapon.system?.properties||[];
+    if(Array.isArray(props))return props.includes('thr')||props.includes('thrown');
+    if(typeof props==='object'&&props!==null) return !!(props.thr||props.thrown);
+    return false;
+  }
+
   /* ── Multiattack ── */
   static async _doMultiattack(actor, enemyTokens, items, selfToken, moveBudget, stickyTarget, tactics) {
     const multi = items.find(i=>i.type==='feat'&&/multiattack/i.test(i.name));
@@ -845,6 +853,15 @@ class NpcAutopilot {
     if(!cands.length) cands=items.filter(i=>i.type==='feat'&&this._hasAttackActivity(i)
       &&/attack|hit|strike|claw|bite|tail|slam|tentacle|horn|gore|punch|kick|stab/i.test(i.name));
     if(!cands.length) return items.find(i=>i.type==='weapon')||items.find(i=>i.type==='feat'&&this._hasAttackActivity(i));
+
+    /* ── Ranged weapons are at disadvantage within 5 ft; exclude them unless thrown ── */
+    if(distFt!==undefined && distFt <= 7){
+      const meleeOk = cands.filter(w=>{
+        const r=this._getWeaponRange(w);
+        return r <= 10 || this._isWeaponThrown(w); /* reach melee, normal melee, or thrown */
+      });
+      if(meleeOk.length) cands = meleeOk;
+    }
 
     if(opts.prefersMelee){
       const melee=cands.filter(w=>this._getWeaponRange(w)<=10);

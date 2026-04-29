@@ -1,8 +1,8 @@
 {
   "id": "ai-companion",
   "title": "AI Companion (NPC Autopilot)",
-  "description": "Foundry VTT NPC combat autopilot. v3.7.4 hotfix: _safeUpdate prevents stale document crashes, fixed _findFlankPosition missing allies variable. v3.7.3: undefined items reference fix. v3.7.2: Movement engine rewrite. v3.7.1: Spell concentration + consumption fix. v3.6.0: Archetype-aware tactics.",
-  "version": "3.7.4",
+  "description": "Foundry VTT NPC combat autopilot. v3.7.5: ranged-weapon disadvantage fix within 5 ft. v3.7.4: stale doc crash hotfix. v3.7.2: movement rewrite. v3.7.1: spellcasting fixes. v3.6.0: Archetype-aware tactics.",
+  "version": "3.7.5",
   "authors": [{"name":"Steve"}],
   "compatibility": {"minimum":"13","verified":"14","maximum":"14"},
   "esmodules": ["scripts/npc-autopilot.js"],
