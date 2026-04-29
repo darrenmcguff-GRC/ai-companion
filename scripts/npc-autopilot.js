@@ -43,7 +43,13 @@ Hooks.on('updateCombat', (combat, changed) => {
   if (changed.round !== undefined) NpcAutopilot._resetTargetCounts();
   const c = combat.combatant;
   if (!c?.token?.actor || c.token.actor.hasPlayerOwner) return;
-  if (c.token?.actor) c.token.actor.setFlag(MODULE_ID, 'reactionSpent', false);
+  if (c.token?.actor) c.token.actor.setFlag(MODULE_ID, 'reactionSpent', false).catch(()=>{});
+  if (changed.round !== undefined) {
+    for(const cc of combat.combatants) {
+      const a = cc.token?.actor;
+      if(a && !a.hasPlayerOwner) a.setFlag(MODULE_ID, 'legendarySpent', false).catch(()=>{});
+    }
+  }
   if (!NpcAutopilot.isEnabled(c.token.actor)) return;
   if (NpcAutopilot._isPaused(c.token.actor)) return;
   NpcAutopilot.takeTurn(c.token.actor, c.token);
@@ -1353,6 +1359,7 @@ class NpcAutopilot {
       const a = c.token?.actor;
       if(!a || a.hasPlayerOwner) continue;
       if(!this.isEnabled(a)) continue;
+      if(a.getFlag(MODULE_ID,'legendarySpent')) continue;
       const legendary = a.items.filter(i=>i.type==='feat' && /legendary/i.test(i.name));
       if(!legendary.length) continue;
       for(const feat of legendary){
@@ -1361,6 +1368,7 @@ class NpcAutopilot {
         if(!enemies.length) continue;
         const target = this._pickTarget(enemies, c.token, a, this._getTactics(a));
         if(!target) continue;
+        await a.setFlag(MODULE_ID, 'legendarySpent', true).catch(()=>{});
         await this._useItem(a, feat, target.actor, c.token);
         await this._say(`⚔️ ${a.name} uses **${feat.name}**!`, a);
         await this._wait(500);
