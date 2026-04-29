@@ -1,8 +1,8 @@
 {
   "id": "ai-companion",
   "title": "AI Companion (NPC Autopilot)",
-  "description": "Foundry VTT NPC combat autopilot. v3.7.3 hotfix: undefined items reference in takeTurn, sniper typo. v3.7.2: Movement engine rewrite. v3.7.1: Fixed concentration detection, spell consumption. v3.6.0: Archetype-aware tactics.",
-  "version": "3.7.3",
+  "description": "Foundry VTT NPC combat autopilot. v3.7.4 hotfix: _safeUpdate prevents stale document crashes, fixed _findFlankPosition missing allies variable. v3.7.3: undefined items reference fix. v3.7.2: Movement engine rewrite. v3.7.1: Spell concentration + consumption fix. v3.6.0: Archetype-aware tactics.",
+  "version": "3.7.4",
   "authors": [{"name":"Steve"}],
   "compatibility": {"minimum":"13","verified":"14","maximum":"14"},
   "esmodules": ["scripts/npc-autopilot.js"],

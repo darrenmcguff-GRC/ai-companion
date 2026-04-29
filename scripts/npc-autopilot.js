@@ -1,8 +1,9 @@
 const MODULE_ID = 'ai-companion';
 
 /* ═══════════════════════════════════════════════════════════════════
-   NPC AUTOPILOT v3.7.3 — Foundry VTT D&D 5e
-   Hotfix: undefined `items` reference in takeTurn, sniper typo.
+   NPC AUTOPILOT v3.7.4 — Foundry VTT D&D 5e
+   Hotfix: _safeUpdate prevents stale document crashes, fixed _findFlankPosition
+   missing allies variable, robust token referencing after movement.
    ═══════════════════════════════════════════════════════════════════ */
 
 /* ─── Settings ──────────────────────────────────────────────────── */
@@ -265,6 +266,7 @@ class NpcAutopilot {
           if(moveRes.movedFt>0) moveRes.msg=`${tokenDoc.name} Disengages and retreats from danger.`;
         } else {
           /* ── caster-aware movement ── */
+          let moveRes={msg:'', movedFt:0};
           let moveTool, desiredRange;
           const hasRangedSpell = items.some(i=>i.type==='spell' && this._spellAvailable(actor,i) && this._getSpellRange(i) > 20);
           const isCaster = ['controller','sorcerer','wizard','warlock','bard','druid','cleric','flying'].includes(tactics?.arch);
@@ -281,7 +283,9 @@ class NpcAutopilot {
             moveTool = this._bestWeaponForRange(actor, this._tokenDistanceFt(tokenDoc, targetToken), {prefersMelee:tactics.prefersMelee});
           }
           if(moveTool){
-            moveRes = await this._npcMoveToTarget(tokenDoc, targetToken, moveTool, {tactics, desiredRange});
+            try{
+              moveRes = await this._npcMoveToTarget(tokenDoc, targetToken, moveTool, {tactics, desiredRange});
+            }catch(e){ this._log(`move error: ${e.message}`); moveRes={msg:'', movedFt:0}; }
           }
         }
         moveMsg = moveRes.msg || '';
@@ -907,9 +911,16 @@ class NpcAutopilot {
     game.combat.unsetFlag(MODULE_ID, 'targetCounts').catch(()=>{});
   }
 
-  /* ═══════════════════════════════════════════════════════════════════
-    MOVEMENT (tactic-aware positioning)
-    ═══════════════════════════════════════════════════════════════════ */
+  static _liveTokenDoc(token){
+    if(!token) return null;
+    const live = canvas.tokens?.get(token.id);
+    return (live?.document || token?.document || token);
+  }
+  static async _safeUpdate(token, updates){
+    const doc = this._liveTokenDoc(token);
+    if(!doc){ console.warn('[NPC Autopilot] _safeUpdate: no live document'); return; }
+    try{ await doc.update(updates); }catch(e){ console.warn('[NPC Autopilot] _safeUpdate failed:', e.message); }
+  }
   static async _npcMoveToTarget(selfToken, targetToken, weapon, opts={}){
     if(!selfToken||!targetToken||!canvas?.grid)return'';
     const self=selfToken.document||selfToken;
@@ -980,12 +991,12 @@ class NpcAutopilot {
       const safe=this._findSafePosition(self,snapped,maxMovePx);
       if(safe){
         const safeMoved=Math.round((Math.hypot(safe.x-self.x, safe.y-self.y)/gridPx)*gridDist);
-        await self.update({x:safe.x,y:safe.y});
+        await this._safeUpdate(selfToken, {x:safe.x,y:safe.y});
         return {msg:`${selfToken.name} manoeuvres closer.`, movedFt:safeMoved};
       }
       return {msg:'', movedFt:0};
     }
-    await self.update({x:snapped.x,y:snapped.y});
+    await this._safeUpdate(selfToken, {x:snapped.x,y:snapped.y});
     return {msg:`${selfToken.name} advances toward ${targetToken.name}.`, movedFt};
   }
 
@@ -1007,10 +1018,10 @@ class NpcAutopilot {
     const hit=CONFIG.Canvas.polygonBackends?.move?.testCollision?CONFIG.Canvas.polygonBackends.move.testCollision({x:self.x,y:self.y}, snapped, {type:'move',mode:'any'}):false;
     if(hit){
       const safe=this._findSafePosition(self,snapped,maxPx);
-      if(safe){ await self.update({x:safe.x,y:safe.y}); return {msg:`${selfToken.name} falls back cautiously.`, movedFt:Math.round((Math.hypot(safe.x-self.x, safe.y-self.y)/gridPx)*gd)}; }
+      if(safe){ await this._safeUpdate(selfToken, {x:safe.x,y:safe.y}); return {msg:`${selfToken.name} falls back cautiously.`, movedFt:Math.round((Math.hypot(safe.x-self.x, safe.y-self.y)/gridPx)*gd)}; }
       return {msg:`${selfToken.name} holds position.`, movedFt:0};
     }
-    await self.update({x:snapped.x,y:snapped.y});
+    await this._safeUpdate(selfToken, {x:snapped.x,y:snapped.y});
     return {msg:`${selfToken.name} retreats from the fray.`, movedFt};
   }
 
@@ -1033,11 +1044,12 @@ class NpcAutopilot {
     const movedFt=Math.round((Math.hypot(snapped.x-self.x, snapped.y-self.y)/gridPx)*gd);
     if(movedFt<=0) return {msg:'', movedFt:0};
 
-    await self.update({x:snapped.x,y:snapped.y});
+    await this._safeUpdate(selfToken, {x:snapped.x,y:snapped.y});
     return {msg:`${selfToken.name} withdraws to safer range.`, movedFt};
   }
 
   static _findFlankPosition(self,target,maxDist){
+    const allies=canvas?.tokens?.placeables?.filter(t=>t.id!==self.id&&t.actor?.type==='npc');
     if(!allies?.length)return null;
     let nearest=null,minD=Infinity;
     for(const a of allies){
