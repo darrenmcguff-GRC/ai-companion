@@ -1,9 +1,9 @@
 const MODULE_ID = 'ai-companion';
 
 /* ═══════════════════════════════════════════════════════════════════
-   NPC AUTOPILOT v3.7.7 — Foundry VTT D&D 5e
-   Friendly NPC support: token disposition determines side (friendly/hostile).
-   Previous: ranged-in-melee enforcement, _safeUpdate stale-doc fix.
+   NPC AUTOPILOT v3.7.8 — Foundry VTT D&D 5e
+   Fixes: in-memory target tracking (prevents NPC pile-on), improved Dash/move-and-attack logic.
+   Previous: caster-aware movement, _safeUpdate stale-doc fix.
    ═══════════════════════════════════════════════════════════════════ */
 
 /* ─── Settings ──────────────────────────────────────────────────── */
@@ -349,24 +349,26 @@ class NpcAutopilot {
       }
     }
 
-    // ── Action Economy (only if action not already used by spell) ──
-    if(!actionUsed){
-      // Dash when target is out of total reach even after remaining movement
-      if(targetToken && !ov.noMove){
-        const dist = this._tokenDistanceFt(tokenDoc, targetToken);
-        const speed = this._getSpeed(actor);
-        const totalReach = moveBudget.ft + speed; /* action move + remaining budget */
-        if(dist > totalReach && dist > speed + 10){
-          const dashRes = await this._actionDash(actor, tokenDoc, targetToken, moveBudget);
-          if(dashRes.movedFt > 0){
-            moveBudget.ft = Math.max(0, moveBudget.ft + dashRes.movedFt); /* Dash adds speed to budget */
-            actionUsed = true;
-            await this._wait(400);
-            const refreshed = canvas.tokens.get(tokenDoc.id);
-            if(refreshed) tokenDoc = refreshed.document || refreshed;
-            enemyTokens = this._findEnemyTokens(tokenDoc);
-            if(ov.blacklist?.length) enemyTokens = enemyTokens.filter(t=>!ov.blacklist.includes(t.id));
-          }
+    // ── Action: Dash to close gap when target is beyond remaining movement ──
+    if(!actionUsed && targetToken && !ov.noMove){
+      const dist = this._tokenDistanceFt(tokenDoc, targetToken);
+      const weapon = this._bestWeaponForRange(actor, dist, {prefersMelee: tactics?.prefersMelee});
+      const weaponRange = weapon ? this._getWeaponRange(weapon) : 5;
+      const needsToMove = dist > weaponRange + 3;
+      const canReachWithDash = dist <= moveBudget.ft + this._getSpeed(actor) + weaponRange + 3;
+      const remainingNotEnough = moveBudget.ft < dist - weaponRange - 3;
+
+      if(needsToMove && canReachWithDash && remainingNotEnough){
+        const dashRes = await this._actionDash(actor, tokenDoc, targetToken, moveBudget);
+        if(dashRes.movedFt > 0){
+          /* Dash effectively grants extra speed; subtract what we actually moved */
+          moveBudget.ft = Math.max(0, moveBudget.ft + this._getSpeed(actor) - dashRes.movedFt);
+          actionUsed = true;
+          await this._wait(400);
+          const refreshed = canvas.tokens.get(tokenDoc.id);
+          if(refreshed) tokenDoc = refreshed.document || refreshed;
+          enemyTokens = this._findEnemyTokens(tokenDoc);
+          if(ov.blacklist?.length) enemyTokens = enemyTokens.filter(t=>!ov.blacklist.includes(t.id));
         }
       }
     }
@@ -924,18 +926,25 @@ class NpcAutopilot {
     return scored[0].token;
   }
 
+  /* ── In-memory target tracking (eliminates async race conditions) ── */
+  static _targetCounts = {};
+
   static _getTargetedCountThisRound(token){
-    if(!game.combat) return 0;
-    const counts = game.combat.getFlag(MODULE_ID, 'targetCounts') || {};
-    return counts[token.id] || 0;
+    if(!token) return 0;
+    return this._targetCounts[token.id] || 0;
   }
   static _incrementTargetCount(token){
-    if(!game.combat || !token) return;
-    const counts = foundry.utils.duplicate(game.combat.getFlag(MODULE_ID, 'targetCounts') || {});
-    counts[token.id] = (counts[token.id] || 0) + 1;
-    game.combat.setFlag(MODULE_ID, 'targetCounts', counts).catch(()=>{});
+    if(!token) return;
+    this._targetCounts[token.id] = (this._targetCounts[token.id] || 0) + 1;
+    /* async persistence to combat flag (non-blocking) */
+    if(game.combat){
+      const counts = foundry.utils.duplicate(game.combat.getFlag(MODULE_ID, 'targetCounts') || {});
+      counts[token.id] = this._targetCounts[token.id];
+      game.combat.setFlag(MODULE_ID, 'targetCounts', counts).catch(()=>{});
+    }
   }
   static _resetTargetCounts(){
+    this._targetCounts = {};
     if(!game.combat) return;
     game.combat.unsetFlag(MODULE_ID, 'targetCounts').catch(()=>{});
   }
