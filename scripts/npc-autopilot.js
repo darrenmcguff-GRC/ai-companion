@@ -1,9 +1,9 @@
 const MODULE_ID = 'ai-companion';
 
 /* ═══════════════════════════════════════════════════════════════════
-   NPC AUTOPILOT v3.7.5 — Foundry VTT D&D 5e
-   Hotfix: ranged weapons excluded at ≤5 ft (disadvantage); thrown weapons still allowed.
-   Previous: _safeUpdate prevents stale document crashes; _findFlankPosition allies fix.
+   NPC AUTOPILOT v3.7.7 — Foundry VTT D&D 5e
+   Friendly NPC support: token disposition determines side (friendly/hostile).
+   Previous: ranged-in-melee enforcement, _safeUpdate stale-doc fix.
    ═══════════════════════════════════════════════════════════════════ */
 
 /* ─── Settings ──────────────────────────────────────────────────── */
@@ -634,6 +634,18 @@ class NpcAutopilot {
       return;
     }
 
+    /* ── Disadvantage within 5 ft: swap to melee if possible, else abort ── */
+    if(dist <= 7 && !this._isWeaponThrown(item) && range > 10){
+      const meleeAlt = this._bestWeaponForRange(actor, dist, {prefersMelee:true});
+      if(meleeAlt && this._getWeaponRange(meleeAlt) <= 10){
+        item = meleeAlt;
+        this._log(`switched to ${item.name} to avoid ranged-in-melee disadvantage`);
+      } else {
+        await this._say(`⚠️ ${actor.name} is too close to use ${item.name} without disadvantage (no melee weapon available).`, actor, {whisper:true});
+        return;
+      }
+    }
+
     const fastRoll = game.settings.get(MODULE_ID, 'npcAutopilotFastRoll');
     const oldTargets = Array.from(game.user.targets).map(t=>t.id);
     const oldControlled = Array.from(canvas.tokens.controlled).map(t=>t.id);
@@ -1066,7 +1078,11 @@ class NpcAutopilot {
   }
 
   static _findFlankPosition(self,target,maxDist){
-    const allies=canvas?.tokens?.placeables?.filter(t=>t.id!==self.id&&t.actor?.type==='npc');
+    const selfDisp = self.disposition || 0;
+    const allies=canvas?.tokens?.placeables?.filter(t=>{
+      if(t.id===(self.id||self._id)) return false;
+      return (t.disposition || 0) === selfDisp && selfDisp !== 0;
+    });
     if(!allies?.length)return null;
     let nearest=null,minD=Infinity;
     for(const a of allies){
@@ -1121,13 +1137,33 @@ class NpcAutopilot {
   /* ═══════════════════════════════════════════════════════════════════
     HELPERS
     ═══════════════════════════════════════════════════════════════════ */
+  /* ── Friendly NPC support: tokens with disposition determine side ── */
   static _findEnemyTokens(selfToken){
-    if(!canvas?.tokens)return[];
-    return canvas.tokens.placeables.filter(t=>{ if(t.id===selfToken?.id)return false; const a=t.actor; return a&&a.type==='character'; });
+    if(!canvas?.tokens) return [];
+    if(!selfToken) return [];
+    const self = selfToken.object || selfToken;
+    const myDisp = self.document?.disposition || self.disposition || 0;
+    return canvas.tokens.placeables.filter(t => {
+      if(t.id === selfToken?.id) return false;
+      const disp = t.document?.disposition || t.disposition || 0;
+      /* Friendly (+1) vs Hostile (-1) are enemies; Neutral matches nothing */
+      if(myDisp === 1 && disp === -1) return true;
+      if(myDisp === -1 && disp === 1) return true;
+      /* Neutral treats anyone with opposite disposition as enemy; otherwise hostile to all non-neutral */
+      if(myDisp === 0) return disp !== 0;
+      return false;
+    });
   }
   static _findAllyTokens(selfToken){
-    if(!canvas?.tokens)return[];
-    return canvas.tokens.placeables.filter(t=>{ if(t.id===selfToken?.id)return false; const a=t.actor; return a&&a.type==='npc'; });
+    if(!canvas?.tokens) return [];
+    if(!selfToken) return [];
+    const self = selfToken.object || selfToken;
+    const myDisp = self.document?.disposition || self.disposition || 0;
+    return canvas.tokens.placeables.filter(t => {
+      if(t.id === selfToken?.id) return false;
+      const disp = t.document?.disposition || t.disposition || 0;
+      return disp === myDisp && myDisp !== 0;
+    });
   }
 
   static _getHPPct(actor){
@@ -1392,9 +1428,13 @@ class NpcAutopilot {
     if(!selfToken || !targetToken) return false;
     const dist = this._tokenDistanceFt(selfToken, targetToken);
     if(dist > 7) return false;
+    const selfDisp = (selfToken.disposition || (selfToken.document?.disposition) || 0);
     const adjacentAlly = canvas.tokens.placeables.find(t=>{
       if(t.id===selfToken.id) return false;
-      if(t.actor?.hasPlayerOwner) return false;
+      if(t.id===targetToken.id) return false;
+      const disp = t.disposition || (t.document?.disposition) || 0;
+      /* adjacent ally = same disposition token within 5 ft of the target */
+      if(disp !== selfDisp || disp === 0) return false;
       const d = this._tokenDistanceFt(t, targetToken);
       return d <= 7;
     });
