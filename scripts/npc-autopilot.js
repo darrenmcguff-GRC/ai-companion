@@ -1,9 +1,9 @@
 const MODULE_ID = 'ai-companion';
 
 /* ═══════════════════════════════════════════════════════════════════
-   NPC AUTOPILOT v3.7.10 — Foundry VTT D&D 5e
-   Fix: personality intro now reads targetToken after it's defined (was pre-declaration ReferenceError).
-   v3.7.9: personality lines per archetype + configurable pacing (turn delay + inter-turn pause).
+   NPC AUTOPILOT v3.7.11 — Foundry VTT D&D 5e
+   Fix: pass target AC as {value: X} instead of {ac: X} for dnd5e v5.3+ attack cards — now shows correct hit/miss indicator.
+   v3.7.10: targetToken ReferenceError hotfix.
    ═══════════════════════════════════════════════════════════════════ */
 
 /* ─── Settings ──────────────────────────────────────────────────── */
@@ -703,7 +703,7 @@ ${moveRes.msg}`, actor); await this._stepDelay(); }
       if(!executed && activity && typeof activity.rollAttack === 'function'){
         try{
           const attackRolls = await activity.rollAttack(
-            {event: null, target: targetToken.actor ? {ac: targetToken.actor.system?.attributes?.ac?.value || 10} : undefined},
+            {event: null, target: targetToken.actor ? {value: targetToken.actor.system?.attributes?.ac?.value || 10} : undefined},
             {configure: false}, {create: true}
           );
           if(attackRolls && attackRolls.length){
