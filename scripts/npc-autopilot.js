@@ -1,9 +1,9 @@
 const MODULE_ID = 'ai-companion';
 
 /* ═══════════════════════════════════════════════════════════════════
-   NPC AUTOPILOT v3.7.8 — Foundry VTT D&D 5e
-   Fixes: in-memory target tracking (prevents NPC pile-on), improved Dash/move-and-attack logic.
-   Previous: caster-aware movement, _safeUpdate stale-doc fix.
+   NPC AUTOPILOT v3.7.9 — Foundry VTT D&D 5e
+   Adds: configurable pacing (turn delay + inter-turn pause), personality lines per archetype, slower dramatic combat flow.
+   Previous: v3.7.8 targeting + Dash fixes.
    ═══════════════════════════════════════════════════════════════════ */
 
 /* ─── Settings ──────────────────────────────────────────────────── */
@@ -16,6 +16,9 @@ Hooks.on('init', () => {
   game.settings.register(MODULE_ID, 'autoAdvance',  { scope:'world', config:true, type:Boolean, default:true,  name:'Auto-Advance Combat', hint:'Automatically end NPC turn after autopilot.' });
   game.settings.register(MODULE_ID, 'npcMovement',  { scope:'world', config:true, type:Boolean, default:true,  name:'NPC Movement', hint:'NPCs move within weapon range before attacking.' });
   game.settings.register(MODULE_ID, 'npcAutopilotFastRoll', { scope:'world', config:true, type:Boolean, default:true, name:'NPC Autopilot Fast-Roll Mode', hint:'When ON, attack & damage rolls happen automatically with NO prompts.' });
+
+  game.settings.register(MODULE_ID, 'turnDelayMs', { scope:'world', config:true, type:Number, default:1200, name:'Turn Step Delay (ms)', hint:'Base delay between each step of an NPC turn (movement, attack, etc). Increase for slower, more dramatic pacing.' });
+  game.settings.register(MODULE_ID, 'interTurnDelayMs', { scope:'world', config:true, type:Number, default:10000, name:'Inter-Turn Pause (ms)', hint:'Pause before advancing to the next combatant. Default 10,000ms = 10 seconds.' });
 
   game.settings.register(MODULE_ID, 'narrativeMode',   { scope:'world', config:true, type:Boolean, default:false, name:'Narrative Mode', hint:'NPC Autopilot describes actions narratively instead of rolling.' });
   game.settings.register(MODULE_ID, 'reactionsEnabled',{ scope:'world', config:true, type:Boolean, default:true,  name:'NPC Reactions', hint:'Enable auto-reactions like Shield and Opportunity Attacks.' });
@@ -246,6 +249,8 @@ class NpcAutopilot {
       if(ov.blacklist?.length) enemyTokens = enemyTokens.filter(t=>!ov.blacklist.includes(t.id));
 
       this._log(`${actor.name} turn start — ${enemyTokens.length} PCs, ${allyTokens.length} allies, HP ${Math.round(hpPct*100)}%, arch=${tactics.arch}`);
+      await this._say(`🎯 ${this._personalityLine(actor, 'targetSelect', {target: targetToken?.name})}`, actor);
+      await this._stepDelay();
 
       const items = actor.items?.contents || [];
 
@@ -290,7 +295,10 @@ class NpcAutopilot {
         }
         moveMsg = moveRes.msg || '';
         moveBudgetFt = Math.max(0, this._getSpeed(actor) - (moveRes.movedFt || 0));
-        if(moveMsg){await this._say(`🏃 ${moveMsg}`, actor); await this._wait(400);}
+        if(moveMsg){
+          await this._say(`🏃 ${this._personalityLine(actor, 'move', {target: targetToken?.name})}\n${moveMsg}`, actor);
+          await this._stepDelay();
+        }
       }
 
       const movedRefreshed = canvas.tokens.get(tokenDoc.id);
@@ -308,7 +316,7 @@ class NpcAutopilot {
       await this._executeFullTurn(actor, tokenDoc, enemyTokens, allyTokens, hpPct, finalTarget, moveBudgetFt, tactics, ov);
 
       if(game.settings.get(MODULE_ID,'autoAdvance')&&game.combat?.combatant?.token?.id===tokenDoc?.id){
-        setTimeout(()=>game.combat?.nextTurn?.(), 800);
+        setTimeout(()=>game.combat?.nextTurn?.(), game.settings.get(MODULE_ID,'interTurnDelayMs') || 10000);
       }
       this._renderPanel();
     }catch(err){console.error('[NPC Autopilot]',err); await this._say(`⚠️ ${err.message}`, actor, {whisper:true});}
@@ -341,7 +349,7 @@ class NpcAutopilot {
       if(bestSpell?.spell){
         await this._castSpell(bestSpell.spell, bestSpell.target, tokenDoc);
         actionUsed = true;
-        await this._wait(600);
+        await this._stepDelay();
         if(this._isAoESpell(bestSpell.spell)){
           enemyTokens = this._findEnemyTokens(tokenDoc);
           if(ov.blacklist?.length) enemyTokens = enemyTokens.filter(t=>!ov.blacklist.includes(t.id));
@@ -364,7 +372,7 @@ class NpcAutopilot {
           /* Dash effectively grants extra speed; subtract what we actually moved */
           moveBudget.ft = Math.max(0, moveBudget.ft + this._getSpeed(actor) - dashRes.movedFt);
           actionUsed = true;
-          await this._wait(400);
+          await this._stepDelay();
           const refreshed = canvas.tokens.get(tokenDoc.id);
           if(refreshed) tokenDoc = refreshed.document || refreshed;
           enemyTokens = this._findEnemyTokens(tokenDoc);
@@ -380,7 +388,7 @@ class NpcAutopilot {
       if(isBruiser && dist <= 7){
         const grappled = await this._doShoveOrGrapple(actor, tokenDoc, targetToken);
         if(grappled) actionUsed = true;
-        await this._wait(400);
+        await this._stepDelay();
       }
     }
 
@@ -392,14 +400,14 @@ class NpcAutopilot {
         .sort((a,b)=>a.pct-b.pct)[0];
       if(woundedAlly){
         const baHeal = this._findBestHealSpell(actor) || this._findSpell(actor,/(healing word|cure wounds|lesser restoration)/i);
-        if(baHeal){ await this._useItem(actor, baHeal, woundedAlly.token.actor, tokenDoc); bonusUsed=true; await this._wait(600); }
+        if(baHeal){ await this._say(`🩹 ${this._personalityLine(actor, 'heal')}`, actor); await this._useItem(actor, baHeal, woundedAlly.token.actor, tokenDoc); bonusUsed=true; await this._stepDelay(); }
       }
     }
 
     // ── Bonus Action: heal self if critical and no ally healed ──
     if(!bonusUsed && hpPct < 0.3){
       const baHeal = this._findBestHealSpell(actor) || this._findSpell(actor,/(healing word|cure wounds)/i);
-      if(baHeal){ await this._useItem(actor,baHeal,actor,tokenDoc); bonusUsed=true; await this._wait(600); }
+      if(baHeal){ await this._say(`🩹 ${this._personalityLine(actor, 'heal')}`, actor); await this._useItem(actor,baHeal,actor,tokenDoc); bonusUsed=true; await this._stepDelay(); }
     }
 
     // ── Action: multiattack or best single attack ──
@@ -425,7 +433,7 @@ class NpcAutopilot {
         if(attackWeapon && finalDist <= this._getWeaponRange(attackWeapon) + 3){
           await this._npcAttack(actor, attackWeapon, targetToken, tokenDoc);
           actionUsed = true;
-          await this._wait(600);
+          await this._stepDelay();
         } else if(attackWeapon) {
           await this._say(`⚠️ ${actor.name} is ${Math.round(finalDist)} ft from ${targetToken.name}, beyond ${attackWeapon.name}'s reach.`, actor, {whisper:true});
         }
@@ -439,7 +447,7 @@ class NpcAutopilot {
       const offHand = this._bestWeaponForRange(actor, dist, {excludeMain:true, prefersMelee:tactics?.prefersMelee});
       if(offHand && offHand.id !== mainWeapon?.id && this._isWeaponLight(mainWeapon) && this._isWeaponLight(offHand) && dist <= this._getWeaponRange(offHand) + 3){
         await this._npcAttack(actor, offHand, targetToken, tokenDoc);
-        await this._wait(600);
+        await this._stepDelay();
       }
     }
 
@@ -454,8 +462,9 @@ class NpcAutopilot {
           const backRes = await this._npcMoveAway(tokenDoc, targetToken, backFt);
           if(backRes.movedFt > 0){
             moveBudget.ft -= backRes.movedFt;
-            await this._say(`🏃 ${backRes.msg}`, actor);
-            await this._wait(300);
+            await this._say(`🏃 ${this._personalityLine(actor, 'move')}
+${backRes.msg}`, actor);
+            await this._stepDelay();
           }
         }
       }
@@ -466,8 +475,9 @@ class NpcAutopilot {
           const closeRes = await this._npcMoveToTarget(tokenDoc, targetToken, weapon, {maxMoveFt: moveBudget.ft, tactics});
           if(closeRes.movedFt > 0){
             moveBudget.ft -= closeRes.movedFt;
-            await this._say(`🏃 ${closeRes.msg}`, actor);
-            await this._wait(300);
+            await this._say(`🏃 ${this._personalityLine(actor, 'move')}
+${closeRes.msg}`, actor);
+            await this._stepDelay();
           }
         }
       }
@@ -580,8 +590,9 @@ class NpcAutopilot {
           const moveRes = await this._npcMoveToTarget(selfToken, finalTarget, weapon, {maxMoveFt: moveBudget.ft, tactics});
           if(moveRes.movedFt){
             moveBudget.ft -= moveRes.movedFt;
-            if(moveRes.msg) await this._say(`🏃 ${moveRes.msg}`, actor);
-            await this._wait(300);
+            if(moveRes.msg){ await this._say(`🏃 ${this._personalityLine(actor, 'move')}
+${moveRes.msg}`, actor); await this._stepDelay(); }
+            await this._stepDelay();
             const refreshed = canvas.tokens.get(selfToken.id);
             if(refreshed) selfToken = refreshed.document || refreshed;
           }
@@ -599,7 +610,7 @@ class NpcAutopilot {
       if(dist <= range + 3){
         await this._npcAttack(actor, weapon, target, selfToken);
         attacksPerformed++;
-        await this._wait(700);
+        await this._stepDelay();
       } else {
         await this._say(`⚠️ ${actor.name}'s ${weapon.name} out of range (${Math.round(dist)}>${range} ft).`, actor, {whisper:true});
       }
@@ -676,7 +687,7 @@ class NpcAutopilot {
       const self = selfToken?.object || selfToken;
       if(tgt?.setTarget) tgt.setTarget(true, {user: game.user, releaseOthers: true});
       if(self?.control) self.control({releaseOthers: true});
-      await this._wait(50);
+      await this._stepDelay();
 
       let executed = false;
       const activity = this._attackActivity(item);
@@ -699,15 +710,21 @@ class NpcAutopilot {
             const isHit = atk.total >= targetAC;
             const isCrit = atk.isCritical || false;
             if(isHit){
-              const hitMsg = isCrit
-                ? `💥 ${actor.name} lands a **critical hit** on ${targetToken.name} with ${item.name}! (Roll ${atk.total})`
-                : `💥 ${actor.name} hits ${targetToken.name} with ${item.name}! (Roll ${atk.total})`;
-              await this._say(hitMsg, actor);
+              if(isCrit){
+                await this._say(`💥 ${this._personalityLine(actor, 'crit', {target: targetToken.name})}
+**Critical hit!** (Roll ${atk.total})`, actor);
+              }else{
+                await this._say(`💥 ${this._personalityLine(actor, 'attack', {target: targetToken.name})}
+(Roll ${atk.total})`, actor);
+              }
+              await this._stepDelay();
               if(typeof activity.rollDamage === 'function'){
                 await activity.rollDamage({event: null, isCritical: isCrit}, {configure: false}, {create: true});
               }
             } else {
-              await this._say(`❌ ${actor.name} attacks ${targetToken.name} and misses! (Rolled ${atk.total} vs AC ${targetAC})`, actor);
+              await this._say(`❌ ${this._personalityLine(actor, 'miss', {target: targetToken.name})}
+(Rolled ${atk.total} vs AC ${targetAC})`, actor);
+              await this._stepDelay();
             }
           }
           executed = true;
@@ -724,10 +741,13 @@ class NpcAutopilot {
           if(atk && atk.total !== undefined){
             const targetAC = targetToken.actor?.system?.attributes?.ac?.value || 10;
             if(atk.total >= targetAC){
-              await this._say(`💥 ${actor.name} hits ${targetToken.name} with ${item.name}! (Attack roll ${atk.total})`, actor);
+              await this._say(`💥 ${this._personalityLine(actor, 'attack', {target: targetToken.name})}\n(Attack roll ${atk.total})`, actor);
+              await this._stepDelay();
               if(typeof item.rollDamage === 'function') await item.rollDamage({event: null, fastForward: fastRoll});
             } else {
-              await this._say(`❌ ${actor.name} attacks ${targetToken.name} and misses! (Rolled ${atk.total} vs AC ${targetAC})`, actor);
+              await this._say(`❌ ${this._personalityLine(actor, 'miss', {target: targetToken.name})}
+(Rolled ${atk.total} vs AC ${targetAC})`, actor);
+              await this._stepDelay();
             }
           }
           executed = true;
@@ -806,7 +826,7 @@ class NpcAutopilot {
       if(targetToken){ const tgt=targetToken.object||targetToken; if(tgt.setTarget) tgt.setTarget(true,{user:game.user,releaseOthers:true}); }
       const self=selfToken?.object||selfToken;
       if(self?.control) self.control({releaseOthers:true});
-      await this._wait(50);
+      await this._stepDelay();
 
       let executed = false;
       const activity = this._firstActivity(item);
@@ -822,7 +842,9 @@ class NpcAutopilot {
         try{ await item.use({configure:false, createMessage:true}); executed=true; }catch(e){}
       }
       if(!executed){
-        await this._say(`🔥 **${actor.name}** uses **${item.name}** on **${targetToken?.name||'target'}**!`, actor);
+        const isHeal = /heal|cure|restoration|aid|prayer/i.test(item.name);
+        await this._say(`${isHeal ? '🩹' : '🔥'} **${actor.name}** ${isHeal ? this._personalityLine(actor, 'heal') : 'unleashes **' + item.name + '** on **' + (targetToken?.name||'target') + '**!'}`, actor);
+        await this._stepDelay();
       }
     }catch(err){ console.error('[NPC Autopilot] useItem error', err); }
     finally{
@@ -1186,6 +1208,151 @@ class NpcAutopilot {
     const prof=sys.prof?.multiplier?(actor?.system?.attributes?.prof||0):0;
     return mod+prof;
   }
+  /* ═══════════════════════════════════════════════════════════════════
+     PERSONALITY — archetype-specific flavour lines
+     ═══════════════════════════════════════════════════════════════════ */
+  static _PERSONALITY = {
+    assassin: {
+      targetSelect: ["{name} slips through the shadows, eyes fixed on {target}…","{name} emerges from the gloom, blade hungry for {target}.","{name} smells weakness — {target} is the prey."],
+      move: ["{name} glides forward like a knife through silk.","{name} prowls closer, silent as a grave.","{name} darts between cover, closing on {target}."],
+      attack: ["{name} strikes from the dark!","{name} lunges with cruel precision!","{name} drives the blade home!"],
+      miss: ["{name}'s blade whistles past {target}.","Shadows betray {name} — a hair's breadth miss.","{name} hisses in frustration, blade catching only air."],
+      crit: ["{name} finds a vital seam — devastating!","{name}'s blade plunges into a gap in {target}'s armour!","A masterstroke from the shadows!"]
+    },
+    bruiser: {
+      targetSelect: ["{name} cracks their knuckles and eyes {target}.","{name} spots {target} and grins savagely.","{name} chooses {target} — time to smash."],
+      move: ["{name} lumbers forward, the ground shaking.","{name} charges like an avalanche of meat and steel!","{name} stomps closer, eager for violence."],
+      attack: ["{name} brings down a crushing blow!","{name} swings with bone-breaking force!","{name} hammers {target} into the dirt!"],
+      miss: ["{name} roars in frustration — a wild swing!","The blow could have felled a tree, but {target} ducks.","{name} misses, but the wind alone could knock a door off its hinges."],
+      crit: ["{name} lands a thunderous blow that echoes across the battlefield!","{name} shatters bone and hope alike!","{target} crumples under the sheer brutality of it!"]
+    },
+    controller: {
+      targetSelect: ["{name} surveys the battlefield and points a finger at {target}.","{name} decides {target} will make a fine puppet.","{name} marks {target} for magical discipline."],
+      move: ["{name} drifts to a vantage point, robes swirling.","{name} steps back, weaving protective wards.","{name} repositions with eerie calm."],
+      attack: ["{name} unleashes a bolt of arcane fury!","{name} hurls eldritch power at {target}!","Spellweaving erupts from {name}'s hands!"],
+      miss: ["{name}'s spell fizzles — {target} shrugs it off.","Arcane energy crackles harmlessly around {target}.","{name} scowls as the shaping unravels."],
+      crit: ["{name} cracks the weave with devastating precision!","{target} reels as raw magic tears through them!","A perfect arcane strike from {name}!"]
+    },
+    flying: {
+      targetSelect: ["{name} circles overhead, choosing {target} from above.","{name} dives towards {target} with predatory focus.","From the clouds, {name} spots {target}."],
+      move: ["{name} swoops through the air with terrifying grace.","{name} banks sharply, closing the distance.","Wings beat as {name} descends on {target}."],
+      attack: ["{name} dives in for the kill!","{name} strikes from above like a thunderbolt!","{name} tears at {target} from the sky!"],
+      miss: ["{name} screeches past {target}, talons closing on empty air.","{name} overshoots — a clumsy recovery.","The wind catches {name} wrong — a near-miss!"]
+    },
+    healer: {
+      targetSelect: ["{name} looks to the wounded, choosing who needs aid most.","{name} turns away from the front line, seeking allies in need."],
+      move: ["{name} hurries to a fallen comrade.","{name} weaves through battle to reach the wounded.","{name} slides into position to help."],
+      attack: ["{name} lashes out with desperate resolve!","Even a healer's wrath has its limits — {name} attacks!","{name} channels divine fury against {target}!"],
+      miss: ["{name} wavers — healing hands are not made for killing.","{name} winces as the blow misses."],
+      heal: ["{name} calls down light upon the wounded!","{name}'s hands glow — wounds begin to close!","A prayer on {name}'s lips — and flesh knits together."]
+    },
+    skirmisher: {
+      targetSelect: ["{name} bounces on their toes, sizing up {target}.","{name} locks eyes with {target} from across the melee."],
+      move: ["{name} darts forward with impossible agility.","{name} weaves through the fray like a leaf on the wind.","{name} bounds towards {target} with reckless momentum."],
+      attack: ["{name} strikes, then dances away!","{name} harries {target} with lightning thrusts!","{name} feints high and stabs low!"],
+      miss: ["{name} overextends — the blow whistles past {target}.","Off balance! {name}'s blade finds nothing but air."]
+    },
+    sniper: {
+      targetSelect: ["{name} lines up a shot on {target}.","{name} exhales slowly, crosshairs settling on {target}.","{name} marks {target} through the gloom."],
+      move: ["{name} skirts the edge of the battlefield, maintaining line of sight.","{name} shifts to a better firing position.","{name} finds higher ground."],
+      attack: ["{name} looses a deadly shot!","{name} fires with deadly calm!","{name}'s arrow streaks toward {target}!"],
+      miss: ["{name} curses — the shot went wide.","A gust of wind betrays {name}'s aim.","{target} moves at the last second — a clean miss."]
+    },
+    barbarian: {
+      targetSelect: ["{name} bellows and points at {target}!","{name}'s rage fixes on {target}.","{name} howls — {target} has drawn the beast's attention."],
+      move: ["{name} charges with mindless fury!","{name} crashes forward like a living battering ram!","The ground trembles under {name}'s charge!"],
+      attack: ["{name} hacks with savage abandon!","{name} unleashes a devastating rage-strike!","{name} roars and brings the weapon down!"],
+      miss: ["{name} roars in impotent fury — a miss!","Blind rage costs {name} — the blow goes wide."]
+    },
+    bard: {
+      targetSelect: ["{name} plucks a string and winks at {target}.","{name} improvises a cutting verse about {target}."],
+      move: ["{name} struts across the battlefield with theatrical flair.","{name} dances between friends and foes alike."],
+      attack: ["{name} strikes a dramatic chord — then strikes {target}!","{name} delivers a cutting remark… and a blade!"],
+      miss: ["{name} fluffs the final note — a swing and a miss!","The crowd winces as {name}'s blade finds nothing."]
+    },
+    cleric: {
+      targetSelect: ["{name} intones a prayer and fixes {target} with righteous fury.","{name} declares {target} unworthy — and prepares to prove it."],
+      move: ["{name} advances with shield raised high.","{name} walks through danger as though wading through shallow water."],
+      attack: ["{name} channels divine might into a smashing blow!","{name} brings holy wrath down upon {target}!"],
+      miss: ["{name} falters — the gods demand better aim.","Faith alone cannot guide a wayward blade."]
+    },
+    druid: {
+      targetSelect: ["{name}'s eyes flash with animal intensity — {target} is the prey.","{name} snarls, nature's fury aimed at {target}."],
+      move: ["{name} shifts form and bounds forward.","Roots and vines part as {name} moves through the terrain."],
+      attack: ["{name} strikes with the fury of the wild!","Teeth, claws, or thorns — {name} attacks {target}!"]
+    },
+    fighter: {
+      targetSelect: ["{name} sets their jaw and faces {target}.","{name} raises their guard — {target} is the objective."],
+      move: ["{name} advances with disciplined, measured strides.","{name} closes ground with textbook military precision."],
+      attack: ["{name} strikes with soldier's discipline!","{name} executes a flawless attack routine!"],
+      miss: ["{name} curses under their breath — a clean miss.","Discipline means nothing if the blade doesn't land."]
+    },
+    monk: {
+      targetSelect: ["{name} bows briefly, focusing ki on {target}.","{name} stills their mind — {target} is the target."],
+      move: ["{name} glides forward with effortless grace.","{name} seems to float across the ground."],
+      attack: ["{name} strikes with a flurry of blows!","{name}'s fists blur with monastic speed!"],
+      miss: ["{name} exhales — focus lost, the blow misses.","Even masters miss. {name} resets their stance."]
+    },
+    paladin: {
+      targetSelect: ["{name} points their blade at {target} — a divine challenge.","{name} names {target} corrupt and prepares judgement."],
+      move: ["{name} strides forward, armour gleaming.","{name} advances with unwavering purpose."],
+      attack: ["{name} delivers a smiting blow!","Divine light flares as {name} strikes {target}!"]
+    },
+    ranger: {
+      targetSelect: ["{name} tracks {target} like prey in the wild.","{name} nocks an arrow, eyes on {target}."],
+      move: ["{name} slips through undergrowth, always watching {target}.","{name} finds the perfect ambush angle."],
+      attack: ["{name} looses a hunter's shot!","{name} strikes with predatory precision!"]
+    },
+    rogue: {
+      targetSelect: ["{name} sizes up {target} from the shadows.","{name} grins — {target} looks profitable."],
+      move: ["{name} vanishes into a nearby shadow, reappearing closer.","{name} weaves through the crowd unseen."],
+      attack: ["{name} strikes from the blind spot!","{name}'s blade finds a chink in {target}'s defences!"],
+      miss: ["{name} curses — nearly had {target}.","A heartbeat too slow — {name} misses."]
+    },
+    sorcerer: {
+      targetSelect: ["{name}'s eyes crackle with raw magic — {target} is in the blast zone.","{name} grins, wild energy gathering."],
+      move: ["{name} drifts through chaos, barely touching the ground.","Arcane wind carries {name} to a safe vantage."],
+      attack: ["{name} unleashes a torrent of raw power!","Magic erupts from {name} — barely controlled!"]
+    },
+    warlock: {
+      targetSelect: ["{name}'s patron whispers: '{target}'.","{name}'s eyes turn black as they choose {target}."],
+      move: ["{name} shifts through shadows not entirely of this world.","Eldritch mist swirls as {name} moves."],
+      attack: ["{name} channels their patron's fury!","A blast of eldritch power from {name}!"]
+    },
+    wizard: {
+      targetSelect: ["{name} consults a mental formula — {target} is the test subject.","{name} adjusts their spectacles: {target} is selected."],
+      move: ["{name} backs away, muttering arcane equations.","{name} finds an angle with clear line of effect."],
+      attack: ["{name} releases a calculated spell!","{name} completes the somatic gesture — destruction follows!"]
+    },
+    default: {
+      targetSelect: ["{name} turns their attention to {target}.","{name} chooses {target} as their next opponent.","{name} locks eyes with {target}."],
+      move: ["{name} advances.","{name} moves into position.","{name} closes the distance."],
+      attack: ["{name} attacks {target}!","{name} strikes at {target}!","{name} swings at {target}!"],
+      miss: ["{name} misses {target}.","{name}'s attack goes wide.","A near miss from {name}!"],
+      crit: ["{name} lands a devastating blow!","A critical strike from {name}!"],
+      heal: ["{name} tends to the wounded.","Healing light flows from {name}."]
+    }
+  };
+
+  static _rand(arr){
+    if(!arr?.length) return '';
+    return arr[Math.floor(Math.random()*arr.length)];
+  }
+
+  static _personalityLine(actor, key, vars={}){
+    const tactics = this._getTactics(actor);
+    const arch = tactics?.arch || 'default';
+    const lines = this._PERSONALITY[arch]?.[key] || this._PERSONALITY.default[key] || ['{name} acts.'];
+    let line = this._rand(lines);
+    const name = actor?.name || 'The creature';
+    line = line.replace(/\{name\}/g, name).replace(/\{target\}/g, vars.target||'the foe');
+    return line;
+  }
+
+  static _stepDelay(){
+    return new Promise(r=>setTimeout(r, game.settings.get(MODULE_ID,'turnDelayMs') || 1200));
+  }
+
   static async _say(content,actor,opts={}){
     await ChatMessage.create({
       user:game.userId,
@@ -1370,6 +1537,12 @@ class NpcAutopilot {
   static async _castSpell(spell, target, selfToken) {
     if(!spell) return;
     this._log(`Casting ${spell.name} on ${target?.name||'self'}`);
+    if(selfToken?.actor){
+      const isHeal = /heal|cure|restoration|aid|prayer/i.test(spell.name);
+      const key = isHeal ? 'heal' : 'attack';
+      await this._say(`${isHeal ? '🩹' : '🔥'} ${this._personalityLine(selfToken.actor, key, {target: target?.name})}`, selfToken.actor);
+      await this._stepDelay();
+    }
     if(target?.actor){
       await this._useItem(selfToken?.actor, spell, target.actor, selfToken);
     } else {
@@ -1472,7 +1645,8 @@ class NpcAutopilot {
      ═══════════════════════════════════════════════════════════════════ */
   static async _actionDash(actor, tokenDoc, targetToken, moveBudget) {
     const speed = actor.system?.attributes?.movement?.walk || 30;
-    await this._say(`🏃 ${actor.name} takes the **Dash** action.`, actor);
+    await this._say(`🏃 ${this._personalityLine(actor, 'move')}
+${actor.name} takes the **Dash** action.`, actor);
     const moveRes = await this._npcMoveToTarget(tokenDoc, targetToken, {name:'Dash'}, {maxMoveFt: speed});
     return { movedFt: moveRes.movedFt || 0 };
   }
@@ -1486,18 +1660,21 @@ class NpcAutopilot {
       await this._useItem(actor, feat, targetToken.actor, tokenDoc);
       return true;
     }
-    await this._say(`🤼 ${actor.name} attempts to ${grapple?'grapple':'shove'} ${targetToken.name}!`, actor);
+    await this._say(`🤼 ${this._personalityLine(actor, 'attack', {target: targetToken.name})}
+${actor.name} attempts to ${grapple?'grapple':'shove'} ${targetToken.name}!`, actor);
     return true;
   }
 
   static async _doDodge(actor) {
-    await this._say(`🛡️ ${actor.name} takes the **Dodge** action.`, actor);
+    await this._say(`🛡️ ${this._personalityLine(actor, 'move')}
+${actor.name} takes the **Dodge** action.`, actor);
   }
 
   static async _doHelp(actor, tokenDoc, allyTokens) {
     const ally = allyTokens[0];
     if(!ally) return;
-    await this._say(`🤝 ${actor.name} takes the **Help** action for ${ally.name}.`, actor);
+    await this._say(`🤝 ${this._personalityLine(actor, 'move')}
+${actor.name} takes the **Help** action for ${ally.name}.`, actor);
   }
 
   static async _quaffPotion(actor) {
@@ -1575,8 +1752,9 @@ class NpcAutopilot {
         if(!target) continue;
         await a.setFlag(MODULE_ID, 'legendarySpent', true).catch(()=>{});
         await this._useItem(a, feat, target.actor, c.token);
-        await this._say(`⚔️ ${a.name} uses **${feat.name}**!`, a);
-        await this._wait(500);
+        await this._say(`⚔️ ${this._personalityLine(a, 'attack')}
+${a.name} uses **${feat.name}**!`, a);
+        await this._stepDelay();
         break;
       }
     }
