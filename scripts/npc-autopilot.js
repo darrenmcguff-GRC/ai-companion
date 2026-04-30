@@ -1,9 +1,9 @@
 const MODULE_ID = 'ai-companion';
 
 /* ═══════════════════════════════════════════════════════════════════
-   NPC AUTOPILOT v3.7.11 — Foundry VTT D&D 5e
-   Fix: pass target AC as {value: X} instead of {ac: X} for dnd5e v5.3+ attack cards — now shows correct hit/miss indicator.
-   v3.7.10: targetToken ReferenceError hotfix.
+   NPC AUTOPILOT v3.7.12 — Foundry VTT D&D 5e
+   Fix: Midi-QOL handling — use item.use() to let Midi-QOL intercept, skip native rollAttack entirely when Midi-QOL is active.
+   Prevents double cards, double damage, and incorrect hit indicators.
    ═══════════════════════════════════════════════════════════════════ */
 
 /* ─── Settings ──────────────────────────────────────────────────── */
@@ -667,6 +667,7 @@ ${moveRes.msg}`, actor); await this._stepDelay(); }
 
     const mqol = game.modules.get("midi-qol")?.active ? globalThis.MidiQOL : null;
     let midiBackup = null;
+    let midiUsed = false; /* tracks whether Midi-QOL handled the attack */
     if(fastRoll && mqol?.configSettings){
       const cs = mqol.configSettings;
       midiBackup = {
@@ -691,77 +692,79 @@ ${moveRes.msg}`, actor); await this._stepDelay(); }
       if(self?.control) self.control({releaseOthers: true});
       await this._stepDelay();
 
-      let executed = false;
-      const activity = this._attackActivity(item);
+      /* ── PATH A: Midi-QOL — item.use() which Midi-QOL intercepts ── */
+      if(mqol?.Workflow){
+        try{
+          await item.use({consume:false, createMessage:true}, {configureDialog:false});
+          midiUsed = true;
+        }catch(e1){}
+      }
 
-      // PATH A: Midi-QOL
-      if(!executed && mqol?.Workflow && activity && typeof activity.use === 'function'){
-        try{ await activity.use({consume:false}, {configure:false}, {create:true}); executed=true; }
-        catch(e1){}
-      }
-      // PATH B: dnd5e v5.3+ native
-      if(!executed && activity && typeof activity.rollAttack === 'function'){
-        try{
-          const attackRolls = await activity.rollAttack(
-            {event: null, target: targetToken.actor ? {value: targetToken.actor.system?.attributes?.ac?.value || 10} : undefined},
-            {configure: false}, {create: true}
-          );
-          if(attackRolls && attackRolls.length){
-            const atk = attackRolls[0];
-            const targetAC = targetToken.actor?.system?.attributes?.ac?.value || 10;
-            const isHit = atk.total >= targetAC;
-            const isCrit = atk.isCritical || false;
-            if(isHit){
-              if(isCrit){
-                await this._say(`💥 ${this._personalityLine(actor, 'crit', {target: targetToken.name})}
+      /* ── PATH B: dnd5e v5.3+ native (no Midi-QOL) ── */
+      if(!midiUsed){
+        const activity = this._attackActivity(item);
+        if(activity && typeof activity.rollAttack === 'function'){
+          try{
+            const attackRolls = await activity.rollAttack(
+              /* pass target AC so native dnd5e card shows correct hit/miss */
+              {event: null, target: targetToken.actor ? {value: targetToken.actor.system?.attributes?.ac?.value || 10} : undefined},
+              {configure: false}, {create: true}
+            );
+            if(attackRolls && attackRolls.length){
+              const atk = attackRolls[0];
+              const targetAC = targetToken.actor?.system?.attributes?.ac?.value || 10;
+              const isHit = atk.total >= targetAC;
+              const isCrit = atk.isCritical || false;
+              if(isHit){
+                if(isCrit){
+                  await this._say(`💥 ${this._personalityLine(actor, 'crit', {target: targetToken.name})}
 **Critical hit!** (Roll ${atk.total})`, actor);
-              }else{
-                await this._say(`💥 ${this._personalityLine(actor, 'attack', {target: targetToken.name})}
+                }else{
+                  await this._say(`💥 ${this._personalityLine(actor, 'attack', {target: targetToken.name})}
 (Roll ${atk.total})`, actor);
-              }
-              await this._stepDelay();
-              if(typeof activity.rollDamage === 'function'){
-                await activity.rollDamage({event: null, isCritical: isCrit}, {configure: false}, {create: true});
-              }
-            } else {
-              await this._say(`❌ ${this._personalityLine(actor, 'miss', {target: targetToken.name})}
+                }
+                await this._stepDelay();
+                if(typeof activity.rollDamage === 'function'){
+                  await activity.rollDamage({event: null, isCritical: isCrit}, {configure: false}, {create: true});
+                }
+              } else {
+                await this._say(`❌ ${this._personalityLine(actor, 'miss', {target: targetToken.name})}
 (Rolled ${atk.total} vs AC ${targetAC})`, actor);
-              await this._stepDelay();
+                await this._stepDelay();
+              }
             }
-          }
-          executed = true;
-        }catch(e2){}
-      }
-      // PATH C: dnd5e legacy item.use()
-      if(!executed && typeof item.use === 'function'){
-        try{ await item.use({configure:false, createMessage:true}); executed=true; }catch(e3){}
-      }
-      // PATH D: legacy rollAttack
-      if(!executed && typeof item.rollAttack === 'function'){
-        try{
-          const atk = await item.rollAttack({event: null, fastForward: fastRoll});
-          if(atk && atk.total !== undefined){
-            const targetAC = targetToken.actor?.system?.attributes?.ac?.value || 10;
-            if(atk.total >= targetAC){
-              await this._say(`💥 ${this._personalityLine(actor, 'attack', {target: targetToken.name})}\n(Attack roll ${atk.total})`, actor);
-              await this._stepDelay();
-              if(typeof item.rollDamage === 'function') await item.rollDamage({event: null, fastForward: fastRoll});
-            } else {
-              await this._say(`❌ ${this._personalityLine(actor, 'miss', {target: targetToken.name})}
+          }catch(e2){}
+        }
+        /* PATH C: legacy item.use() */
+        else if(typeof item.use === 'function'){
+          try{ await item.use({configure:false, createMessage:true}); }catch(e3){}
+        }
+        /* PATH D: legacy rollAttack */
+        else if(typeof item.rollAttack === 'function'){
+          try{
+            const atk = await item.rollAttack({event: null, fastForward: fastRoll});
+            if(atk && atk.total !== undefined){
+              const targetAC = targetToken.actor?.system?.attributes?.ac?.value || 10;
+              if(atk.total >= targetAC){
+                await this._say(`💥 ${this._personalityLine(actor, 'attack', {target: targetToken.name})}\n(Attack roll ${atk.total})`, actor);
+                await this._stepDelay();
+                if(typeof item.rollDamage === 'function') await item.rollDamage({event: null, fastForward: fastRoll});
+              } else {
+                await this._say(`❌ ${this._personalityLine(actor, 'miss', {target: targetToken.name})}
 (Rolled ${atk.total} vs AC ${targetAC})`, actor);
-              await this._stepDelay();
+                await this._stepDelay();
+              }
             }
-          }
-          executed = true;
-        }catch(e4){}
-      }
-      // PATH E: manual
-      if(!executed){
-        try{
-          const bonus = this._getAtkBonus(actor, item);
-          const roll = await new Roll(`1d20 + ${bonus}`).evaluate();
-          await roll.toMessage({ speaker: ChatMessage.getSpeaker({actor}), flavor: `${actor.name} attacks ${targetToken.name} with ${item.name}` });
-        }catch(e5){}
+          }catch(e4){}
+        }
+        /* PATH E: manual fallback */
+        else {
+          try{
+            const bonus = this._getAtkBonus(actor, item);
+            const roll = await new Roll(`1d20 + ${bonus}`).evaluate();
+            await roll.toMessage({ speaker: ChatMessage.getSpeaker({actor}), flavor: `${actor.name} attacks ${targetToken.name} with ${item.name}` });
+          }catch(e5){}
+        }
       }
 
     }catch(err){ console.error('[NPC Autopilot] attack fatal error', err); }
@@ -773,13 +776,15 @@ ${moveRes.msg}`, actor); await this._stepDelay(); }
         cs.autoFastForward = midiBackup.autoFastForward; cs.gmAutoFastForward = midiBackup.gmAutoFastForward;
         this._log(`midi-qol config restored`);
       }
-      if(game.user.updateTokenTargets) game.user.updateTokenTargets(oldTargets);
-      else {
-        for(const t of Array.from(game.user.targets)){ const p=t.object||t; if(p.setTarget) p.setTarget(false,{user:game.user}); }
-        for(const id of oldTargets){ const to=canvas.tokens.get(id); if(to?.setTarget) to.setTarget(true,{user:game.user}); }
+      if(!midiUsed){
+        if(game.user.updateTokenTargets) game.user.updateTokenTargets(oldTargets);
+        else {
+          for(const t of Array.from(game.user.targets)){ const p=t.object||t; if(p.setTarget) p.setTarget(false,{user:game.user}); }
+          for(const id of oldTargets){ const to=canvas.tokens.get(id); if(to?.setTarget) to.setTarget(true,{user:game.user}); }
+        }
+        for(const t of Array.from(canvas.tokens.controlled)){ const p=t.object||t; if(p.release) p.release(); }
+        for(const id of oldControlled){ const to=canvas.tokens.get(id); if(to?.control) to.control({releaseOthers:false}); }
       }
-      for(const t of Array.from(canvas.tokens.controlled)){ const p=t.object||t; if(p.release) p.release(); }
-      for(const id of oldControlled){ const to=canvas.tokens.get(id); if(to?.control) to.control({releaseOthers:false}); }
     }
   }
 

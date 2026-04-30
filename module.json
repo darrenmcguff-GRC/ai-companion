@@ -1,8 +1,8 @@
 {
   "id": "ai-companion",
   "title": "AI Companion (NPC Autopilot)",
-  "description": "Foundry VTT NPC combat autopilot. v3.7.11: fix attack card hit/miss display. v3.7.10: targetToken ReferenceError hotfix. v3.7.9: personality lines + pacing.",
-  "version": "3.7.11",
+  "description": "Foundry VTT NPC combat autopilot. v3.7.12: Midi-QOL double-card fix — use item.use() intercept instead of native rollAttack. v3.7.11: target AC display fix.",
+  "version": "3.7.12",
   "authors": [{"name":"Steve"}],
   "compatibility": {"minimum":"13","verified":"14","maximum":"14"},
   "esmodules": ["scripts/npc-autopilot.js"],
