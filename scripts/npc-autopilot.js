@@ -1,9 +1,9 @@
 const MODULE_ID = 'ai-companion';
 
 /* ═══════════════════════════════════════════════════════════════════
-   NPC AUTOPILOT v3.7.12 — Foundry VTT D&D 5e
-   Fix: Midi-QOL handling — use item.use() to let Midi-QOL intercept, skip native rollAttack entirely when Midi-QOL is active.
-   Prevents double cards, double damage, and incorrect hit indicators.
+   NPC AUTOPILOT v3.7.13 — Foundry VTT D&D 5e
+   Fix: moveRes shadow variable; melee standOff to 0/5ft; targeting pile-on penalty;
+   switched Midi-QOL path to activity.use() for correct hit indicator.
    ═══════════════════════════════════════════════════════════════════ */
 
 /* ─── Settings ──────────────────────────────────────────────────── */
@@ -273,7 +273,6 @@ class NpcAutopilot {
           if(moveRes.movedFt>0) moveRes.msg=`${tokenDoc.name} Disengages and retreats from danger.`;
         } else {
           /* ── caster-aware movement ── */
-          let moveRes={msg:'', movedFt:0};
           let moveTool, desiredRange;
           const hasRangedSpell = items.some(i=>i.type==='spell' && this._spellAvailable(actor,i) && this._getSpellRange(i) > 20);
           const isCaster = ['controller','sorcerer','wizard','warlock','bard','druid','cleric','flying'].includes(tactics?.arch);
@@ -692,12 +691,15 @@ ${moveRes.msg}`, actor); await this._stepDelay(); }
       if(self?.control) self.control({releaseOthers: true});
       await this._stepDelay();
 
-      /* ── PATH A: Midi-QOL — item.use() which Midi-QOL intercepts ── */
+      /* ── PATH A: Midi-QOL — use attack activity directly ── */
       if(mqol?.Workflow){
-        try{
-          await item.use({consume:false, createMessage:true}, {configureDialog:false});
-          midiUsed = true;
-        }catch(e1){}
+        const activity = this._attackActivity(item);
+        if(activity && typeof activity.use === 'function'){
+          try{
+            await activity.use({consume:false, createMessage:true}, {configureDialog:false});
+            midiUsed = true;
+          }catch(e1){ this._log(`midi activity.use() error: ${e1.message}`); }
+        }
       }
 
       /* ── PATH B: dnd5e v5.3+ native (no Midi-QOL) ── */
@@ -943,12 +945,13 @@ ${moveRes.msg}`, actor); await this._stepDelay(); }
       const dist = selfToken ? this._tokenDistanceFt(selfToken, t) : 30;
       const targetCount = this._getTargetedCountThisRound(t);
       const jitter = Math.random();
-      let score = (targetCount*50) + (dist*1.2) + (jitter*30);
+      let score = (dist*1.2) + (jitter*30);
       if(preferWounded){
-        score -= (1 - hpPct)*80;
+        score -= (1 - hpPct)*100;
       } else {
         score += (hpPct*25);
       }
+      score += (targetCount*200); /* heavily penalise pile-on */
       return{token:t, score};
     });
     scored.sort((a,b)=>a.score-b.score);
@@ -1004,21 +1007,22 @@ ${moveRes.msg}`, actor); await this._stepDelay(); }
     const pos = tactics.positioning || 'charge';
     if(desiredRange){
       standOffFt = Math.max(5, desiredRange * 0.6); /* close enough to cast, far enough to avoid melee */
-    } else if(range<=10){
-      standOffFt = 5;
+    } else if(range<=5){
+      standOffFt = 0; /* 5 ft weapons: close to adjacent */
+    } else if(range===10){
+      standOffFt = 5; /* reach weapons: stop at 5 ft (10 ft reach from there) */
     } else {
       if(pos==='hang_back'){
-        standOffFt = Math.max(15, Math.min(range - 5, distFt - 5));
+        standOffFt = Math.max(range * 0.4, 15);
       } else if(pos==='mid'){
-        standOffFt = Math.max(10, Math.min(range*0.5, distFt - 5));
+        standOffFt = Math.max(range * 0.5, 10);
       } else if(pos==='flank'){
-        standOffFt = Math.max(5, Math.min(range, distFt - 5));
+        standOffFt = Math.max(range * 0.4, 5);
       } else {
-        standOffFt=Math.min(distFt-5, Math.max(range*0.5, Math.min(range-5, speedFt)));
-        if(standOffFt<5) standOffFt=5;
+        standOffFt=Math.max(range*0.5, 10);
       }
-      if(standOffFt>distFt) standOffFt=distFt-5;
-      if(distFt<=range && distFt>=5 && ((distFt<=range*0.75 && distFt>=10))) return {msg:'', movedFt:0};
+      if(standOffFt > distFt-5) standOffFt=Math.max(0, distFt-5);
+      if(distFt <= range && distFt >= standOffFt) return {msg:'', movedFt:0};
     }
 
     if(distFt<=standOffFt+2) return {msg:'', movedFt:0};
