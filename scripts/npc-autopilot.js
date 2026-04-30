@@ -1,9 +1,9 @@
 const MODULE_ID = 'ai-companion';
 
 /* ═══════════════════════════════════════════════════════════════════
-   NPC AUTOPILOT v3.7.9 — Foundry VTT D&D 5e
-   Adds: configurable pacing (turn delay + inter-turn pause), personality lines per archetype, slower dramatic combat flow.
-   Previous: v3.7.8 targeting + Dash fixes.
+   NPC AUTOPILOT v3.7.10 — Foundry VTT D&D 5e
+   Fix: personality intro now reads targetToken after it's defined (was pre-declaration ReferenceError).
+   v3.7.9: personality lines per archetype + configurable pacing (turn delay + inter-turn pause).
    ═══════════════════════════════════════════════════════════════════ */
 
 /* ─── Settings ──────────────────────────────────────────────────── */
@@ -249,8 +249,6 @@ class NpcAutopilot {
       if(ov.blacklist?.length) enemyTokens = enemyTokens.filter(t=>!ov.blacklist.includes(t.id));
 
       this._log(`${actor.name} turn start — ${enemyTokens.length} PCs, ${allyTokens.length} allies, HP ${Math.round(hpPct*100)}%, arch=${tactics.arch}`);
-      await this._say(`🎯 ${this._personalityLine(actor, 'targetSelect', {target: targetToken?.name})}`, actor);
-      await this._stepDelay();
 
       const items = actor.items?.contents || [];
 
@@ -261,6 +259,10 @@ class NpcAutopilot {
       }
       this._log(`locked target: ${targetToken?.name||'none'} (${enemyTokens.length} enemies)`);
       if(targetToken) this._incrementTargetCount(targetToken);
+
+      /* personality intro */
+      await this._say(`🎯 ${this._personalityLine(actor, 'targetSelect', {target: targetToken?.name})}`, actor);
+      await this._stepDelay();
 
       let moveBudgetFt = 0;
       let moveMsg = '';
