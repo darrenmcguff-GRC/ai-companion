@@ -1,7 +1,7 @@
 const MODULE_ID = 'ai-companion';
 
 /* ═══════════════════════════════════════════════════════════════════
-   NPC AUTOPILOT v3.8.0 — Foundry VTT D&D 5e
+   NPC AUTOPILOT v3.8.1 — Foundry VTT D&D 5e
    Ollama Bridge integration: AI dynamic narration for target locks,
    attacks, kills, and round openings. Soft dependency — safe without.
    ═══════════════════════════════════════════════════════════════════ */
@@ -278,6 +278,7 @@ class NpcAutopilot {
       await this._say(`🎯 ${this._personalityLine(actor, 'targetSelect', {target: targetToken?.name})}`, actor);
       /* AI narration on target lock */
       await this._ollamaNarrateTarget(actor, targetToken, tactics, enemyTokens.length, allyTokens.length);
+      this._ollamaLogEvent(`${actor.name} targets ${targetToken?.name}`);
       await this._stepDelay();
 
       let moveBudgetFt = 0;
@@ -365,6 +366,7 @@ class NpcAutopilot {
       const bestSpell = await this._pickBestSpell(actor, enemyTokens, allyTokens, tokenDoc, tactics, moveBudget);
       if(bestSpell?.spell){
         await this._castSpell(bestSpell.spell, bestSpell.target, tokenDoc);
+        this._ollamaLogEvent(`${actor.name} cast ${bestSpell.spell.name} on ${bestSpell.target?.name||'self'}`);
         actionUsed = true;
         await this._stepDelay();
         if(this._isAoESpell(bestSpell.spell)){
@@ -743,6 +745,7 @@ ${moveRes.msg}`, actor); await this._stepDelay(); }
 (Roll ${atk.total})`, actor);
                 }
                 await this._ollamaNarrateAction(actor, targetToken, item, 'hit');
+                this._ollamaLogEvent(`${actor.name} hit ${targetToken.name} with ${item.name}`);
                 await this._stepDelay();
                 if(typeof activity.rollDamage === 'function'){
                   await activity.rollDamage({event: null, isCritical: isCrit}, {configure: false}, {create: true});
@@ -751,6 +754,7 @@ ${moveRes.msg}`, actor); await this._stepDelay(); }
                 await this._say(`❌ ${this._personalityLine(actor, 'miss', {target: targetToken.name})}
 (Rolled ${atk.total} vs AC ${targetAC})`, actor);
                 await this._ollamaNarrateAction(actor, targetToken, item, 'miss');
+                this._ollamaLogEvent(`${actor.name} missed ${targetToken.name} with ${item.name}`);
                 await this._stepDelay();
               }
             }
@@ -1404,21 +1408,78 @@ ${moveRes.msg}`, actor); await this._stepDelay(); }
     return game.settings.get(MODULE_ID, 'ollamaEnabled') && !!this._ollama;
   }
 
-  /* Build a concise combat snapshot for AI prompts */
-  static _ollamaSceneSnapshot() {
+  /* Build a rich combat snapshot for AI prompts */
+  static _ollamaBuildContext(actor, target, opts = {}) {
     const c = game.combat;
     if (!c?.started) return '';
-    const pcs = c.combatants.filter(cc => cc.token?.actor?.hasPlayerOwner).map(cc => {
-      const a = cc.token.actor;
-      const hp = a.system?.attributes?.hp;
-      return `${a.name} (HP ${hp?.value||0}/${hp?.max||'?'})`;
-    });
-    const npcs = c.combatants.filter(cc => cc.token?.actor && !cc.token.actor.hasPlayerOwner).map(cc => {
-      const a = cc.token.actor;
-      const hp = a.system?.attributes?.hp;
-      return `${a.name} (HP ${hp?.value||0}/${hp?.max||'?'})`;
-    });
-    return `Round ${c.round||1}. PCs: ${pcs.join(', ')||'none'}. Enemies: ${npcs.join(', ')||'none'}.`;
+    const scene = c.scene;
+    const grid = scene?.grid?.distance || 5;
+
+    /* Actor state */
+    const aHp = actor.system?.attributes?.hp;
+    const aPct = Math.round((aHp?.value || 0) / (aHp?.max || 1) * 100);
+    const aWounded = aPct <= 25 ? 'critically wounded' : aPct <= 50 ? 'bloodied' : aPct <= 75 ? 'injured' : 'steady';
+    const aConditions = actor.effects?.filter(e => !e.disabled).map(e => e.name).filter(n => !n.startsWith('(AE)')).slice(0, 4).join(', ') || '';
+    const aToken = canvas.tokens.placeables.find(t => t.actor?.id === actor.id);
+    const aWeapon = actor.items?.find(i => i.type === 'weapon' && i.system?.equipped);
+
+    /* Target state */
+    const tActor = target?.actor;
+    const tHp = tActor?.system?.attributes?.hp;
+    const tPct = tActor ? Math.round((tHp?.value || 0) / (tHp?.max || 1) * 100) : 0;
+    const tWounded = tPct <= 25 ? 'critically wounded' : tPct <= 50 ? 'bloodied' : tPct <= 75 ? 'injured' : 'unharmed';
+    const tConditions = tActor?.effects?.filter(e => !e.disabled).map(e => e.name).filter(n => !n.startsWith('(AE)')).slice(0, 4).join(', ') || '';
+
+    /* Terrain / scene context */
+    const terrain = [];
+    if (scene?.name) terrain.push(`in ${scene.name}`);
+    if (aToken && target) {
+      try {
+        const ray = new Ray(aToken.center, target.center || aToken.center);
+        const hasWall = canvas.walls?.checkCollision?.(ray, { type: 'sight', mode: 'any' });
+        terrain.push(hasWall ? 'obscured sightline' : 'clear sightline');
+      } catch(e) { /* skip wall check */ }
+    }
+
+    /* Last 3 combat events for narrative continuity */
+    const recent = (this._recentEvents || []).slice(-3).map(e => e.text).join('; ') || 'fighting continues';
+
+    /* Nearby combatants (within 30ft) */
+    const nearby = [];
+    if (aToken) {
+      for (const other of c.combatants) {
+        if (!other.token?.actor || other.token.actor.id === actor.id) continue;
+        const oTok = canvas.tokens.get(other.token.id);
+        if (!oTok) continue;
+        const dist = Math.round(canvas.grid.measureDistance(aToken, oTok));
+        if (dist <= 30) {
+          const oHp = other.token.actor.system?.attributes?.hp;
+          const oPct = Math.round((oHp?.value||0)/(oHp?.max||1)*100);
+          nearby.push(`${other.token.actor.name} (${oPct}% HP, ${dist}ft ${dist<=5?'adjacent':dist<=15?'close':'nearby'})`);
+        }
+      }
+    }
+
+    /* Round / positioning */
+    const parts = [
+      `Round ${c.round || 1}, Turn ${c.turn + 1 || '?'}.`,
+      `${actor.name} (${aPct}% HP, ${aWounded}${aConditions ? ', ' + aConditions : ''})`,
+      `armed with ${aWeapon?.name || 'a weapon'}`,
+      `${terrain.length ? terrain.join(', ') + '.' : ''}`,
+      opts.action ? `is about to ${opts.action}.` : 'is acting.',
+      `Target: ${target?.name || 'none'} (${tPct}% HP, ${tWounded}${tConditions ? ', ' + tConditions : ''}).`,
+      nearby.length ? `Nearby: ${nearby.join('; ')}.` : '',
+      `Recent events: ${recent}.`,
+      `Reply in character. No meta-text. No OOC.`
+    ];
+    return parts.filter(Boolean).join('\n');
+  }
+
+  /* Track events for narrative continuity */
+  static _recentEvents = [];
+  static _ollamaLogEvent(text) {
+    this._recentEvents = (this._recentEvents || []).slice(-5);
+    this._recentEvents.push({ text, time: Date.now() });
   }
 
   /* AI: dramatic target lock narration */
@@ -1426,8 +1487,8 @@ ${moveRes.msg}`, actor); await this._stepDelay(); }
     if (!this._ollamaEnabled || !game.settings.get(MODULE_ID, 'ollamaNarrateTarget') || !target) return;
     try {
       const temp = game.settings.get(MODULE_ID, 'ollamaTemperature') || 0.7;
-      const scene = this._ollamaSceneSnapshot();
-      const prompt = `${scene}\n\n${actor.name}, a ${tactics?.arch||'warrior'} with ${Math.round(this._getHPPct(actor)*100)}% HP, locks eyes on ${target.name} (${Math.round(this._getHPPct(target?.actor||actor)*100)}% HP) across ${Math.round(canvas.tokens.get(actor.id)?.distanceTo?.(target)||30)} feet of battlefield. ${allyCount>0?`${allyCount} allies stand nearby. `:''}${enemyCount>1?`${enemyCount-1} other enemies lurk. `:''}Write one dramatic sentence describing ${actor.name}'s murderous intent.`;
+      const ctx = this._ollamaBuildContext(actor, target, { action: 'choose a target' });
+      const prompt = `${ctx}\n\nWrite one dramatic sentence describing ${actor.name} singling out ${target.name || 'the enemy'} — the tension before the first blow. Mention the weapon, the distance, or the look in their eyes. In voice only.`;
       const reply = await this._ollama.generate(prompt, { temperature: temp, timeout: 8000 });
       if (reply && reply.length > 5) {
         await ChatMessage.create({
@@ -1444,7 +1505,11 @@ ${moveRes.msg}`, actor); await this._stepDelay(); }
     if (!this._ollamaEnabled || !game.settings.get(MODULE_ID, 'ollamaNarrateAction') || !target) return;
     try {
       const temp = game.settings.get(MODULE_ID, 'ollamaTemperature') || 0.7;
-      const prompt = `${this._ollamaSceneSnapshot()}\n\n${actor.name} ${result==='hit'?'strikes':'swings at'} ${target.name} with ${weapon?.name||'a weapon'}. Write one vivid, cinematic sentence describing the ${result==='hit'?'impact':'miss'}. No dialogue tags. No OOC text.`;
+      const actionDesc = result === 'hit'
+        ? `lands a ${weapon?.system?.damage?.parts?.[0]?.[1] || 'bloody'} blow with ${weapon?.name || 'a weapon'}`
+        : `swings ${weapon?.name || 'a weapon'} but ${target.name || 'the target'} evades`;
+      const ctx = this._ollamaBuildContext(actor, target, { action: actionDesc });
+      const prompt = `${ctx}\n\nOne vivid cinematic sentence showing the ${result === 'hit' ? 'moment of impact — flesh, steel, pain' : 'narrow dodge — breath held, blade whistling past'}. In voice only.`;
       const reply = await this._ollama.generate(prompt, { temperature: temp, timeout: 8000 });
       if (reply && reply.length > 5) {
         await ChatMessage.create({
@@ -1461,7 +1526,8 @@ ${moveRes.msg}`, actor); await this._stepDelay(); }
     if (!this._ollamaEnabled || !game.settings.get(MODULE_ID, 'ollamaNarrateKill') || !target) return;
     try {
       const temp = game.settings.get(MODULE_ID, 'ollamaTemperature') || 0.7;
-      const prompt = `${this._ollamaSceneSnapshot()}\n\n${actor.name} drops ${target.name} to the ground with ${weapon?.name||'a decisive blow'}. Write one dramatic cinematic sentence describing the moment the enemy falls. No dialogue tags. No OOC text.`;
+      const ctx = this._ollamaBuildContext(actor, target, { action: `delivers the killing blow with ${weapon?.name || 'a decisive strike'}` });
+      const prompt = `${ctx}\n\nOne dramatic cinematic sentence describing the death of ${target.name || 'the enemy'} — the silence after the last breath. In voice only.`;
       const reply = await this._ollama.generate(prompt, { temperature: temp, timeout: 8000 });
       if (reply && reply.length > 5) {
         await ChatMessage.create({
@@ -1478,8 +1544,22 @@ ${moveRes.msg}`, actor); await this._stepDelay(); }
     if (!this._ollamaEnabled || !game.settings.get(MODULE_ID, 'ollamaNarrateRound') || !combat?.started) return;
     try {
       const temp = game.settings.get(MODULE_ID, 'ollamaTemperature') || 0.7;
-      const scene = this._ollamaSceneSnapshot();
-      const prompt = `${scene}\n\nThe battle rages. Write one atmospheric cinematic sentence describing the current state of the fight. Mention blood, steel, or spellfire. No dialogue tags. No OOC text.`;
+      const c = combat;
+      const pcs = c.combatants.filter(cc => cc.token?.actor?.hasPlayerOwner).map(cc => {
+        const a = cc.token.actor;
+        const hp = a.system?.attributes?.hp;
+        const pct = Math.round((hp?.value || 0) / Math.max(1, hp?.max || 1) * 100);
+        return `${a.name} (${pct}%)`;
+      });
+      const npcs = c.combatants.filter(cc => cc.token?.actor && !cc.token.actor.hasPlayerOwner).map(cc => {
+        const a = cc.token.actor;
+        const hp = a.system?.attributes?.hp;
+        const pct = Math.round((hp?.value || 0) / Math.max(1, hp?.max || 1) * 100);
+        return `${a.name} (${pct}%)`;
+      });
+      const recent = (this._recentEvents || []).slice(-3).map(e => e.text).join('; ') || 'fighting continues';
+      const scene = c.scene;
+      const prompt = `Round ${c.round || 1}. PCs: ${pcs.join(', ') || 'none'}. Enemies: ${npcs.join(', ') || 'none'}. Scene: ${scene?.name || 'an unknown battlefield'}.\nRecent events: ${recent}.\n\nWrite one atmospheric cinematic sentence describing the current state of the fight — the smell, the light, the silence between blows. In voice only.`;
       const reply = await this._ollama.generate(prompt, { temperature: temp, timeout: 10000 });
       if (reply && reply.length > 5) {
         await ChatMessage.create({
