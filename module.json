@@ -7,8 +7,8 @@
   "compatibility": {"minimum":"13","verified":"14","maximum":"14"},
   "esmodules": ["scripts/npc-autopilot.js"],
   "styles": ["styles/npc-autopilot.css"],
-  "manifest": "https://raw.githubusercontent.com/darrenmcguff-GRC/ai-companion/main/module.json",
-  "download": "https://raw.githubusercontent.com/darrenmcguff-GRC/ai-companion/main/ai-companion.zip",
-  "url": "https://github.com/darrenmcguff-GRC/ai-companion",
-  "readme": "https://raw.githubusercontent.com/darrenmcguff-GRC/ai-companion/main/README.md"
+  "manifest": "https://raw.githubusercontent.com/darrenmcguff-GRC/npc-autopilot/main/module.json",
+  "download": "https://raw.githubusercontent.com/darrenmcguff-GRC/npc-autopilot/main/npc-autopilot.zip",
+  "url": "https://github.com/darrenmcguff-GRC/npc-autopilot",
+  "readme": "https://raw.githubusercontent.com/darrenmcguff-GRC/npc-autopilot/main/README.md"
 }

@@ -24,4 +24,4 @@ NpcAutopilot.takeTurn(actor, token)
 Foundry VTT v11–v14, dnd5e system.
 
 ---
-Manifest: `https://raw.githubusercontent.com/darrenmcguff-GRC/ai-companion/main/module.json`
+Manifest: `https://raw.githubusercontent.com/darrenmcguff-GRC/npc-autopilot/main/module.json`
