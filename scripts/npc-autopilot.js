@@ -1,7 +1,7 @@
 const MODULE_ID = 'ai-companion';
 
 /* ═══════════════════════════════════════════════════════════════════
-   NPC AUTOPILOT v3.8.3 — Foundry VTT D&D 5e
+   NPC AUTOPILOT v3.8.4 — Foundry VTT D&D 5e
    Unified attack path: always use activity.rollAttack with target AC
    injected up-front so dnd5e hit/miss cards render correctly.
    Soft dependency — safe without.
@@ -31,6 +31,7 @@ Hooks.on('init', () => {
   game.settings.register(MODULE_ID, 'ollamaNarrateRound', { scope:'world', config:true, type:Boolean, default:true, name:'Narrate Round Start', hint:'AI narrates scene-setting each new round.'});
   game.settings.register(MODULE_ID, 'ollamaTemperature', { scope:'world', config:true, type:Number, default:0.7, name:'AI Temperature', hint:'Narration creativity: 0.0 deterministic, 1.0 very creative.'});
   game.settings.register(MODULE_ID, 'ollamaNarrateDelay', { scope:'world', config:true, type:Number, default:800, name:'Narration Pause (ms)', hint:'Pause after AI narration before continuing.'});
+  game.settings.register(MODULE_ID, 'dropThrownWeapons', { scope:'world', config:true, type:Boolean, default:false, name:'Drop Thrown Weapons', hint:'When an NPC throws a weapon (dagger, javelin, handaxe, etc), reduce quantity by 1 and drop a loot token on the map.'});
 });
 
 Hooks.on('ready', () => {
@@ -537,6 +538,116 @@ ${closeRes.msg}`, actor);
     return false;
   }
 
+  /* ═══════════════════════════════════════════════════════════════════
+     THROWN WEAPON DROPS (native — no ItemPiles dependency)
+     When an NPC throws a weapon, reduce quantity by 1 and spawn
+     a loot token on the map at the target's location.
+     ═══════════════════════════════════════════════════════════════════ */
+  static async _dropThrownWeapon(actor, item, selfToken, targetToken, hit){
+    if(!game.settings.get(MODULE_ID, 'dropThrownWeapons')) return;
+    if(!item || !selfToken || !targetToken) return;
+    if(!this._isWeaponThrown(item)) return;
+
+    /* 1. Reduce quantity on the NPC, or remove if last one */
+    let qty = item.system?.quantity ?? 1;
+    if(qty > 1){
+      await item.update({'system.quantity': qty - 1}).catch(()=>{});
+      this._log(`${actor.name} threw ${item.name}; ${qty-1} remaining.`);
+    } else {
+      await actor.deleteEmbeddedDocuments('Item', [item.id]).catch(()=>{});
+      this._log(`${actor.name} threw their last ${item.name}.`);
+    }
+
+    /* 2. Figure drop position: near target on hit, short scatter on miss */
+    const grid = canvas.grid;
+    const gridDist = grid?.distance || 5;
+    const gridPx = grid?.size || 50;
+    let dropX, dropY;
+    const targetDoc = targetToken.document || targetToken;
+    const selfDoc = selfToken.document || selfToken;
+    if(hit){
+      dropX = targetDoc.x;
+      dropY = targetDoc.y;
+    } else {
+      /* Scatter short of target */
+      const dx = targetDoc.x - selfDoc.x;
+      const dy = targetDoc.y - selfDoc.y;
+      const frac = 0.5 + (Math.random() * 0.3); /* 50-80% of the way */
+      dropX = selfDoc.x + dx * frac;
+      dropY = selfDoc.y + dy * frac;
+    }
+
+    /* 3. Snap to grid */
+    let snapped;
+    if(grid.getSnappedPoint){
+      snapped = grid.getSnappedPoint({x: dropX, y: dropY}, {mode: CONST.GRID_SNAPPING_MODES.CENTER});
+    } else {
+      snapped = {x: Math.round(dropX / gridPx) * gridPx, y: Math.round(dropY / gridPx) * gridPx};
+    }
+
+    /* 4. Create / fetch the loot-pile actor */
+    let pileActor = this._getOrCreateLootActor();
+    if(!pileActor) return;
+
+    /* 5. Build token data: item image, name, small scale */
+    const itemImg = item.img || item.texture?.src || 'icons/weapons/daggers/dagger-simple-blue-grey.webp';
+    const tokenData = await pileActor.getTokenDocument({
+      x: snapped.x, y: snapped.y,
+      name: item.name,
+      'texture.src': itemImg,
+      'texture.scaleX': 0.6, 'texture.scaleY': 0.6,
+      width: 0.5, height: 0.5,
+      actorLink: false,
+      vision: false,
+      displayName: 50,
+      elevation: targetDoc.elevation ?? 0
+    });
+
+    /* 6. Place token on current scene */
+    const scene = canvas.scene;
+    if(!scene) return;
+    const [placed] = await scene.createEmbeddedDocuments('Token', [tokenData.toObject()]);
+    if(!placed) return;
+
+    /* 7. Add the item to the synthetic actor (with full data so it can be picked up) */
+    const itemData = item.toObject ? item.toObject() : foundry.utils.duplicate(item);
+    itemData.system.quantity = 1; /* just the one thrown */
+    await placed.actor.createEmbeddedDocuments('Item', [itemData]).catch(()=>{});
+
+    this._log(`Dropped ${item.name} at [${snapped.x}, ${snapped.y}] → token ${placed.name}`);
+  }
+
+  static _getOrCreateLootActor(){
+    const cacheKey = '_lootActorId';
+    let actor = game.actors.get(this[cacheKey]);
+    if(actor) return actor;
+
+    /* Find existing loot actor by name */
+    actor = game.actors.find(a => a.name === 'Dropped Weapons' && a.type === 'npc');
+    if(actor){
+      this[cacheKey] = actor.id;
+      return actor;
+    }
+
+    /* Create a minimal loot-bearer NPC */
+    actor = Actor.create({
+      name: 'Dropped Weapons',
+      type: 'npc',
+      img: 'icons/svg/item-bag.svg',
+      prototypeToken: {
+        actorLink: false,
+        bar1: {attribute: ''},
+        vision: false,
+        displayName: 50
+      }
+    }, {displaySheet: false});
+    if(actor){
+      this[cacheKey] = actor.id;
+      this._log(`Created loot actor: Dropped Weapons (${actor.id})`);
+    }
+    return actor;
+  }
+
   /* ── Multiattack ── */
   static async _doMultiattack(actor, enemyTokens, items, selfToken, moveBudget, stickyTarget, tactics) {
     const multi = items.find(i=>i.type==='feat'&&/multiattack/i.test(i.name));
@@ -691,6 +802,8 @@ ${moveRes.msg}`, actor); await this._stepDelay(); }
       if(self?.control) self.control({releaseOthers: true});
       await this._stepDelay();
 
+      let isHit = true; /* default for paths where we can't determine hit/miss */
+
       /* ── Unified attack path: always use activity.rollAttack so target AC is known up-front ── */
       const activity = this._attackActivity(item);
       if(activity && typeof activity.rollAttack === 'function'){
@@ -703,7 +816,7 @@ ${moveRes.msg}`, actor); await this._stepDelay(); }
           );
           if(attackRolls && attackRolls.length){
             const atk = attackRolls[0];
-            const isHit = atk.total >= targetAC;
+            isHit = atk.total >= targetAC;
             const isCrit = atk.isCritical || false;
             if(isHit){
               if(isCrit){
@@ -739,7 +852,8 @@ ${moveRes.msg}`, actor); await this._stepDelay(); }
           const atk = await item.rollAttack({event: null, fastForward: fastRoll});
           if(atk && atk.total !== undefined){
             const targetAC = targetToken.actor?.system?.attributes?.ac?.value || 10;
-            if(atk.total >= targetAC){
+            isHit = atk.total >= targetAC;
+            if(isHit){
               await this._say(`💥 ${this._personalityLine(actor, 'attack', {target: targetToken.name})}\\n(Attack roll ${atk.total})`, actor);
               await this._stepDelay();
               if(typeof item.rollDamage === 'function') await item.rollDamage({event: null, fastForward: fastRoll});
@@ -759,6 +873,9 @@ ${moveRes.msg}`, actor); await this._stepDelay(); }
           await roll.toMessage({ speaker: ChatMessage.getSpeaker({actor}), flavor: `${actor.name} attacks ${targetToken.name} with ${item.name}` });
         }catch(e4){}
       }
+
+      /* ── Drop thrown weapon if applicable ── */
+      await this._dropThrownWeapon(actor, item, selfToken, targetToken, isHit);
 
     }catch(err){ console.error('[NPC Autopilot] attack fatal error', err); }
     finally{
