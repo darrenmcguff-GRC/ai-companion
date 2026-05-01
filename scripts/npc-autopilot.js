@@ -455,6 +455,13 @@ class NpcAutopilot {
           await this._npcAttack(actor, attackWeapon, targetToken, tokenDoc);
           actionUsed = true;
           await this._stepDelay();
+        } else if(attackWeapon && finalDist <= 60) {
+          /* ── Improvised throw: out of melee range, throw any melee weapon ── */
+          this._log(`improvised throw: ${attackWeapon.name} from ${Math.round(finalDist)}ft`);
+          await this._say(`🎯 ${actor.name} hurls ${attackWeapon.name} at ${targetToken.name}!`, actor);
+          await this._npcAttack(actor, attackWeapon, targetToken, tokenDoc);
+          actionUsed = true;
+          await this._stepDelay();
         } else if(attackWeapon) {
           await this._say(`⚠️ ${actor.name} is ${Math.round(finalDist)} ft from ${targetToken.name}, beyond ${attackWeapon.name}'s reach.`, actor, {whisper:true});
         }
@@ -532,67 +539,10 @@ ${closeRes.msg}`, actor);
 
   static _isWeaponThrown(weapon){
     if(!weapon)return false;
-    /* dnd5e property formats across versions:
-       - Array of strings:    ["thr","finesse","light"]
-       - Array of objects:    [{id:"thr"},{id:"light"}]
-       - Plain object:        {thr:true, finesse:true}
-       - ES6 Map:             Map { "thr" => true, "light" => true }
-       - dnd5e 3.x:           Map of { key: {id, name, ...} } */
-    const props = weapon.system?.properties;
-    if(!props) {
-      /* Also check attack activity range as fallback */
-      const act = this._attackActivity(weapon);
-      if(act?.range?.long) return true;
-      return false;
-    }
-
-    /* Map format */
-    if(props instanceof Map){
-      if(props.has('thr') || props.has('thrown')) return true;
-      for(const [key, val] of props.entries()){
-        if(/thr(?:own)?/.test(key.toLowerCase())){
-          if(val === true || val === 1 || val || typeof val === 'object') return true;
-        }
-        if(typeof val === 'object' && val !== null){
-          const id = val.id || val.name || val._id || '';
-          if(/thr(?:own)?/.test(String(id).toLowerCase())) return true;
-        }
-      }
-      return false;
-    }
-
-    /* Array format */
-    if(Array.isArray(props)) return props.some(p => {
-      if(typeof p === 'string') return /thr(?:own)?/.test(p.toLowerCase());
-      if(p && typeof p === 'object') {
-        const id = p.id || p.name || '';
-        return /thr(?:own)?/.test(String(id).toLowerCase());
-      }
-      return false;
-    });
-
-    /* Object format */
-    if(typeof props === 'object'){
-      for(const key of Object.keys(props)){
-        if(/thr(?:own)?/.test(key.toLowerCase())){
-          const val = props[key];
-          if(val === true || val === 1) return true;
-          if(typeof val === 'object' && val !== null){
-            const id = val.id || val.name || val._id || key;
-            if(/thr(?:own)?/.test(String(id).toLowerCase())) return true;
-          }
-        }
-      }
-      /* Also check values whose keys contain thr/thrown */
-      for(const val of Object.values(props)){
-        if(val && typeof val === 'object'){
-          const id = val.id || val.name || '';
-          if(/thr(?:own)?/.test(String(id).toLowerCase())) return true;
-        }
-      }
-      return false;
-    }
-    return false;
+    /* A weapon is "thrown" if its range is > 10 (i.e., not purely melee).
+       This handles all dnd5e versions regardless of property format. */
+    const range = this._getWeaponRange(weapon);
+    return range > 10;
   }
 
   /* ═══════════════════════════════════════════════════════════════════
@@ -602,10 +552,13 @@ ${closeRes.msg}`, actor);
      ═══════════════════════════════════════════════════════════════════ */
   static async _dropThrownWeapon(actor, item, selfToken, targetToken, hit){
     const setting = game.settings.get(MODULE_ID, 'dropThrownWeapons');
-    this._log(`_dropThrownWeapon: setting=${setting}, item=${item?.name}, thrown=${this._isWeaponThrown(item)}`);
+    const dist = this._tokenDistanceFt(selfToken, targetToken);
+    this._log(`_dropThrownWeapon: setting=${setting}, item=${item?.name}, dist=${Math.round(dist)}ft`);
     if(!setting) return;
     if(!item || !selfToken || !targetToken) return;
-    if(!this._isWeaponThrown(item)) return;
+    /* Drop any weapon thrown at range (> 10 ft = improvised or proper thrown) */
+    if(dist <= 10) return;
+    this._log(`_dropThrownWeapon: dropping ${item.name}`);
 
     /* 1. Reduce quantity on the NPC, or remove if last one */
     let qty = item.system?.quantity ?? 1;
