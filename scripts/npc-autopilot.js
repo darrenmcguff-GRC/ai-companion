@@ -532,9 +532,21 @@ ${closeRes.msg}`, actor);
 
   static _isWeaponThrown(weapon){
     if(!weapon)return false;
-    const props=weapon.system?.properties||[];
-    if(Array.isArray(props))return props.includes('thr')||props.includes('thrown');
-    if(typeof props==='object'&&props!==null) return !!(props.thr||props.thrown);
+    /* dnd5e property formats vary by version:
+       Array:   ["thr", "finesse", "light"]
+       Object:  { thr: true, finesse: true }
+       String:  "thr" or "thrown"
+       Old key: "thr" in array/object
+       New key: "thrown" in array/object */
+    const props = weapon.system?.properties;
+    if(!props) return false;
+    if(Array.isArray(props)) return props.some(p => /thr(?:own)?/.test(String(p).toLowerCase()));
+    if(typeof props === 'object'){
+      for(const key of Object.keys(props)){
+        if(/thr(?:own)?/.test(key.toLowerCase()) && props[key]) return true;
+      }
+      return false;
+    }
     return false;
   }
 
@@ -544,7 +556,9 @@ ${closeRes.msg}`, actor);
      a loot token on the map at the target's location.
      ═══════════════════════════════════════════════════════════════════ */
   static async _dropThrownWeapon(actor, item, selfToken, targetToken, hit){
-    if(!game.settings.get(MODULE_ID, 'dropThrownWeapons')) return;
+    const setting = game.settings.get(MODULE_ID, 'dropThrownWeapons');
+    this._log(`_dropThrownWeapon: setting=${setting}, item=${item?.name}, thrown=${this._isWeaponThrown(item)}`);
+    if(!setting) return;
     if(!item || !selfToken || !targetToken) return;
     if(!this._isWeaponThrown(item)) return;
 
@@ -591,17 +605,19 @@ ${closeRes.msg}`, actor);
 
     /* 5. Build token data: item image, name, small scale */
     const itemImg = item.img || item.texture?.src || 'icons/weapons/daggers/dagger-simple-blue-grey.webp';
+    this._log(`_dropThrownWeapon: creating token at [${snapped.x},${snapped.y}] img=${itemImg}`);
     const tokenData = await pileActor.getTokenDocument({
       x: snapped.x, y: snapped.y,
       name: item.name,
       'texture.src': itemImg,
-      'texture.scaleX': 0.6, 'texture.scaleY': 0.6,
-      width: 0.5, height: 0.5,
+      'texture.scaleX': 0.8, 'texture.scaleY': 0.8,
+      width: 1, height: 1,
       actorLink: false,
       vision: false,
       displayName: 50,
       elevation: targetDoc.elevation ?? 0
     });
+    this._log(`_dropThrownWeapon: got tokenDocument, placing...`);
 
     /* 6. Place token on current scene */
     const scene = canvas.scene;
