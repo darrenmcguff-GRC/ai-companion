@@ -532,18 +532,63 @@ ${closeRes.msg}`, actor);
 
   static _isWeaponThrown(weapon){
     if(!weapon)return false;
-    /* dnd5e property formats vary by version:
-       Array:   ["thr", "finesse", "light"]
-       Object:  { thr: true, finesse: true }
-       String:  "thr" or "thrown"
-       Old key: "thr" in array/object
-       New key: "thrown" in array/object */
+    /* dnd5e property formats across versions:
+       - Array of strings:    ["thr","finesse","light"]
+       - Array of objects:    [{id:"thr"},{id:"light"}]
+       - Plain object:        {thr:true, finesse:true}
+       - ES6 Map:             Map { "thr" => true, "light" => true }
+       - dnd5e 3.x:           Map of { key: {id, name, ...} } */
     const props = weapon.system?.properties;
-    if(!props) return false;
-    if(Array.isArray(props)) return props.some(p => /thr(?:own)?/.test(String(p).toLowerCase()));
+    if(!props) {
+      /* Also check attack activity range as fallback */
+      const act = this._attackActivity(weapon);
+      if(act?.range?.long) return true;
+      return false;
+    }
+
+    /* Map format */
+    if(props instanceof Map){
+      if(props.has('thr') || props.has('thrown')) return true;
+      for(const [key, val] of props.entries()){
+        if(/thr(?:own)?/.test(key.toLowerCase())){
+          if(val === true || val === 1 || val || typeof val === 'object') return true;
+        }
+        if(typeof val === 'object' && val !== null){
+          const id = val.id || val.name || val._id || '';
+          if(/thr(?:own)?/.test(String(id).toLowerCase())) return true;
+        }
+      }
+      return false;
+    }
+
+    /* Array format */
+    if(Array.isArray(props)) return props.some(p => {
+      if(typeof p === 'string') return /thr(?:own)?/.test(p.toLowerCase());
+      if(p && typeof p === 'object') {
+        const id = p.id || p.name || '';
+        return /thr(?:own)?/.test(String(id).toLowerCase());
+      }
+      return false;
+    });
+
+    /* Object format */
     if(typeof props === 'object'){
       for(const key of Object.keys(props)){
-        if(/thr(?:own)?/.test(key.toLowerCase()) && props[key]) return true;
+        if(/thr(?:own)?/.test(key.toLowerCase())){
+          const val = props[key];
+          if(val === true || val === 1) return true;
+          if(typeof val === 'object' && val !== null){
+            const id = val.id || val.name || val._id || key;
+            if(/thr(?:own)?/.test(String(id).toLowerCase())) return true;
+          }
+        }
+      }
+      /* Also check values whose keys contain thr/thrown */
+      for(const val of Object.values(props)){
+        if(val && typeof val === 'object'){
+          const id = val.id || val.name || '';
+          if(/thr(?:own)?/.test(String(id).toLowerCase())) return true;
+        }
       }
       return false;
     }
@@ -1543,7 +1588,7 @@ ${moveRes.msg}`, actor); await this._stepDelay(); }
         if (!other.token?.actor || other.token.actor.id === actor.id) continue;
         const oTok = canvas.tokens.get(other.token.id);
         if (!oTok) continue;
-        const dist = Math.round(canvas.grid.measureDistance(aToken, oTok));
+        const dist = Math.round(this._tokenDistanceFt(aToken, oTok));
         if (dist <= 30) {
           const oHp = other.token.actor.system?.attributes?.hp;
           const oPct = Math.round((oHp?.value||0)/(oHp?.max||1)*100);
