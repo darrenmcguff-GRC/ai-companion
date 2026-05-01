@@ -1,8 +1,8 @@
 {
   "id": "ai-companion",
   "title": "NPC Autopilot",
-  "description": "Foundry VTT NPC combat autopilot for D&D 5e. v3.7.14: module renamed to NPC Autopilot. v3.7.13: targeting, movement, hit-indicator, and melee-positioning fixes.",
-  "version": "3.7.14",
+  "description": "Foundry VTT NPC combat autopilot for D&D 5e. v3.8.0: Ollama Bridge AI narration integration — dynamic target lock, attack, kill, and round-start narration. Soft dependency, safe without. v3.7.14: renamed to NPC Autopilot. v3.7.13: targeting, movement, hit-indicator, and melee-positioning fixes.",
+  "version": "3.8.0",
   "authors": [{"name":"Steve"}],
   "compatibility": {"minimum":"13","verified":"14","maximum":"14"},
   "esmodules": ["scripts/npc-autopilot.js"],

@@ -1,9 +1,9 @@
 const MODULE_ID = 'ai-companion';
 
 /* ═══════════════════════════════════════════════════════════════════
-   NPC AUTOPILOT v3.7.14 — Foundry VTT D&D 5e
-   Fix: moveRes shadow variable; melee standOff to 0/5ft; targeting pile-on penalty;
-   switched Midi-QOL path to activity.use() for correct hit indicator.
+   NPC AUTOPILOT v3.8.0 — Foundry VTT D&D 5e
+   Ollama Bridge integration: AI dynamic narration for target locks,
+   attacks, kills, and round openings. Soft dependency — safe without.
    ═══════════════════════════════════════════════════════════════════ */
 
 /* ─── Settings ──────────────────────────────────────────────────── */
@@ -21,14 +21,22 @@ Hooks.on('init', () => {
   game.settings.register(MODULE_ID, 'interTurnDelayMs', { scope:'world', config:true, type:Number, default:10000, name:'Inter-Turn Pause (ms)', hint:'Pause before advancing to the next combatant. Default 10,000ms = 10 seconds.' });
 
   game.settings.register(MODULE_ID, 'narrativeMode',   { scope:'world', config:true, type:Boolean, default:false, name:'Narrative Mode', hint:'NPC Autopilot describes actions narratively instead of rolling.' });
-  game.settings.register(MODULE_ID, 'reactionsEnabled',{ scope:'world', config:true, type:Boolean, default:true,  name:'NPC Reactions', hint:'Enable auto-reactions like Shield and Opportunity Attacks.' });
-  game.settings.register(MODULE_ID, 'legendaryEnabled',{ scope:'world', config:true, type:Boolean, default:true,  name:'Legendary Actions', hint:'Enable legendary actions for NPCs.' });
+  game.settings.register(MODULE_ID, 'reactionsEnabled',{ scope:'world', config:true, type:Boolean, default:true,  name:'NPC Reactions', hint:'Enable auto-reactions like Shield and Opportunity Attacks.'});
+  game.settings.register(MODULE_ID, 'legendaryEnabled',{ scope:'world', config:true, type:Boolean, default:true,  name:'Legendary Actions', hint:'Enable legendary actions for NPCs.'});
+  game.settings.register(MODULE_ID, 'ollamaEnabled', { scope:'world', config:true, type:Boolean, default:false, name:'AI Narration', hint:'Use Ollama Bridge for dynamic combat narration.'});
+  game.settings.register(MODULE_ID, 'ollamaNarrateTarget', { scope:'world', config:true, type:Boolean, default:true, name:'Narrate Target Lock', hint:'AI narrates when an NPC picks a target.'});
+  game.settings.register(MODULE_ID, 'ollamaNarrateAction', { scope:'world', config:true, type:Boolean, default:true, name:'Narrate Attack/Miss', hint:'AI narrates attack/miss results.'});
+  game.settings.register(MODULE_ID, 'ollamaNarrateKill', { scope:'world', config:true, type:Boolean, default:true, name:'Narrate Kills', hint:'AI narrates when an NPC drops a target to 0 HP.'});
+  game.settings.register(MODULE_ID, 'ollamaNarrateRound', { scope:'world', config:true, type:Boolean, default:true, name:'Narrate Round Start', hint:'AI narrates scene-setting each new round.'});
+  game.settings.register(MODULE_ID, 'ollamaTemperature', { scope:'world', config:true, type:Number, default:0.7, name:'AI Temperature', hint:'Narration creativity: 0.0 deterministic, 1.0 very creative.'});
+  game.settings.register(MODULE_ID, 'ollamaNarrateDelay', { scope:'world', config:true, type:Number, default:800, name:'Narration Pause (ms)', hint:'Pause after AI narration before continuing.'});
 });
 
 Hooks.on('ready', () => {
   if (game.settings.get(MODULE_ID, 'hudOpen')) NpcAutopilot.open();
   NpcAutopilot._setupReactions();
   NpcAutopilot._setupLegendaryActions();
+  NpcAutopilot._setupKillNarration();
 });
 
 Hooks.on('renderTokenHUD', (hud, html) => {
@@ -41,7 +49,10 @@ Hooks.on('renderTokenHUD', (hud, html) => {
 Hooks.on('updateCombat', (combat, changed) => {
   if (!combat?.started || !game.user.isGM) return;
   if (changed.turn === undefined && changed.round === undefined) return;
-  if (changed.round !== undefined) NpcAutopilot._resetTargetCounts();
+  if (changed.round !== undefined) {
+    NpcAutopilot._resetTargetCounts();
+    NpcAutopilot._ollamaNarrateRound(combat);
+  }
   const c = combat.combatant;
   if (!c?.token?.actor || c.token.actor.hasPlayerOwner) return;
   if (c.token?.actor) c.token.actor.setFlag(MODULE_ID, 'reactionSpent', false).catch(()=>{});
@@ -178,6 +189,7 @@ class NpcAutopilot {
         if(a==='toggle-narrative'){ game.settings.set(MODULE_ID,'narrativeMode',!game.settings.get(MODULE_ID,'narrativeMode')); NpcAutopilot._renderPanel(); }
         if(a==='toggle-reactions'){ game.settings.set(MODULE_ID,'reactionsEnabled',!game.settings.get(MODULE_ID,'reactionsEnabled')); NpcAutopilot._renderPanel(); }
         if(a==='toggle-legendary'){ game.settings.set(MODULE_ID,'legendaryEnabled',!game.settings.get(MODULE_ID,'legendaryEnabled')); NpcAutopilot._renderPanel(); }
+        if(a==='toggle-ollama'){ game.settings.set(MODULE_ID,'ollamaEnabled',!game.settings.get(MODULE_ID,'ollamaEnabled')); NpcAutopilot._renderPanel(); }
         if(a==='manual-turn'){ const c=game.combat?.combatant; if(c?.token?.actor) NpcAutopilot.takeTurn(c.token.actor,c.token); }
         if(a==='toggle-npc'){ const id=$(this).data('actor-id'); const a2=game.actors.get(id); if(a2) NpcAutopilot.setEnabled(a2, $(this).is(':checked')); }
         if(a==='override-npc'){ const id=$(this).data('actor-id'); const a2=game.actors.get(id); if(a2) NpcAutopilot._openActorOverride(a2); }
@@ -197,6 +209,7 @@ class NpcAutopilot {
     const narrative=game.settings.get(MODULE_ID,'narrativeMode');
     const reactions=game.settings.get(MODULE_ID,'reactionsEnabled');
     const legendary=game.settings.get(MODULE_ID,'legendaryEnabled');
+    const ollamaOn=game.settings.get(MODULE_ID,'ollamaEnabled');
     const combat=game.combat; const active=combat?.started;
     const cur=combat?.combatant; const ct=cur?.token; const ca=ct?.actor; const isNPC=ca&&!ca.hasPlayerOwner;
     const currentArch = ca ? this._detectArchetype(ca) : '';
@@ -205,7 +218,8 @@ class NpcAutopilot {
       <span class="npc-ap-toggle ${fastRoll?'on':'off'}" data-ap-action="toggle-fast"><i class="fas fa-forward"></i> ${fastRoll?'FAST':'SLOW'}</span>
       <span class="npc-ap-toggle ${narrative?'on':'off'}" data-ap-action="toggle-narrative"><i class="fas fa-book"></i> ${narrative?'NARR':'STD'}</span>
       <span class="npc-ap-toggle ${reactions?'on':'off'}" data-ap-action="toggle-reactions"><i class="fas fa-shield-alt"></i> ${reactions?'REACT':'NONE'}</span>
-      <span class="npc-ap-toggle ${legendary?'on':'off'}" data-ap-action="toggle-legendary"><i class="fas fa-dragon"></i> ${legendary?'LEG':'NONE'}</span></div>`;
+      <span class="npc-ap-toggle ${legendary?'on':'off'}" data-ap-action="toggle-legendary"><i class="fas fa-dragon"></i> ${legendary?'LEG':'NONE'}</span>
+      <span class="npc-ap-toggle ${ollamaOn?'on':'off'}" data-ap-action="toggle-ollama" title="AI Narration via Ollama Bridge"><i class="fas fa-brain"></i> ${ollamaOn?'AI':'OFF'}</span></div>`;
     html+=`<div class="npc-ap-combat-status" style="text-align:center;padding:4px;font-size:12px;">${active?'🎲 Round '+(combat.round||1)+', Turn '+((combat.turn||0)+1):'No combat'}</div>`;
     if(ct){ const hp=ca?.system?.attributes?.hp||{}; const p=Math.round((hp.value||0)/(hp.max||1)*100); const c=p>50?'#4ade80':p>25?'#facc15':'#f87171';
       html+=`<div class="npc-ap-card"><img src="${ct.texture?.src||ca?.img||'icons/svg/mystery-man.svg'}">
@@ -262,6 +276,8 @@ class NpcAutopilot {
 
       /* personality intro */
       await this._say(`🎯 ${this._personalityLine(actor, 'targetSelect', {target: targetToken?.name})}`, actor);
+      /* AI narration on target lock */
+      await this._ollamaNarrateTarget(actor, targetToken, tactics, enemyTokens.length, allyTokens.length);
       await this._stepDelay();
 
       let moveBudgetFt = 0;
@@ -642,6 +658,7 @@ ${moveRes.msg}`, actor); await this._stepDelay(); }
     const dist = this._tokenDistanceFt(selfToken, targetToken);
     const range = this._getWeaponRange(item);
     this._log(`${actor.name} → ${targetToken.name} (${Math.round(dist)}ft, range ${range}ft, item "${item.name}")`);
+    await actor.setFlag(MODULE_ID, 'lastAttackWeapon', item.name).catch(()=>{});
 
     if(dist > range + 3){
       await this._say(`⚠️ ${actor.name} is ${Math.round(dist)} ft from ${targetToken.name} — ${item.name} only reaches ${range} ft.`, actor, {whisper:true});
@@ -725,6 +742,7 @@ ${moveRes.msg}`, actor); await this._stepDelay(); }
                   await this._say(`💥 ${this._personalityLine(actor, 'attack', {target: targetToken.name})}
 (Roll ${atk.total})`, actor);
                 }
+                await this._ollamaNarrateAction(actor, targetToken, item, 'hit');
                 await this._stepDelay();
                 if(typeof activity.rollDamage === 'function'){
                   await activity.rollDamage({event: null, isCritical: isCrit}, {configure: false}, {create: true});
@@ -732,6 +750,7 @@ ${moveRes.msg}`, actor); await this._stepDelay(); }
               } else {
                 await this._say(`❌ ${this._personalityLine(actor, 'miss', {target: targetToken.name})}
 (Rolled ${atk.total} vs AC ${targetAC})`, actor);
+                await this._ollamaNarrateAction(actor, targetToken, item, 'miss');
                 await this._stepDelay();
               }
             }
@@ -1376,6 +1395,102 @@ ${moveRes.msg}`, actor); await this._stepDelay(); }
   static _wait(ms){return new Promise(r=>setTimeout(r,ms));}
 
   /* ═══════════════════════════════════════════════════════════════════
+     OLLAMA BRIDGE INTEGRATION — soft dependency, safe if missing
+     ═══════════════════════════════════════════════════════════════════ */
+  static get _ollama() {
+    return game.modules.get('ollama-bridge')?.api || globalThis.OllamaBridge || null;
+  }
+  static get _ollamaEnabled() {
+    return game.settings.get(MODULE_ID, 'ollamaEnabled') && !!this._ollama;
+  }
+
+  /* Build a concise combat snapshot for AI prompts */
+  static _ollamaSceneSnapshot() {
+    const c = game.combat;
+    if (!c?.started) return '';
+    const pcs = c.combatants.filter(cc => cc.token?.actor?.hasPlayerOwner).map(cc => {
+      const a = cc.token.actor;
+      const hp = a.system?.attributes?.hp;
+      return `${a.name} (HP ${hp?.value||0}/${hp?.max||'?'})`;
+    });
+    const npcs = c.combatants.filter(cc => cc.token?.actor && !cc.token.actor.hasPlayerOwner).map(cc => {
+      const a = cc.token.actor;
+      const hp = a.system?.attributes?.hp;
+      return `${a.name} (HP ${hp?.value||0}/${hp?.max||'?'})`;
+    });
+    return `Round ${c.round||1}. PCs: ${pcs.join(', ')||'none'}. Enemies: ${npcs.join(', ')||'none'}.`;
+  }
+
+  /* AI: dramatic target lock narration */
+  static async _ollamaNarrateTarget(actor, target, tactics, enemyCount, allyCount) {
+    if (!this._ollamaEnabled || !game.settings.get(MODULE_ID, 'ollamaNarrateTarget') || !target) return;
+    try {
+      const temp = game.settings.get(MODULE_ID, 'ollamaTemperature') || 0.7;
+      const scene = this._ollamaSceneSnapshot();
+      const prompt = `${scene}\n\n${actor.name}, a ${tactics?.arch||'warrior'} with ${Math.round(this._getHPPct(actor)*100)}% HP, locks eyes on ${target.name} (${Math.round(this._getHPPct(target?.actor||actor)*100)}% HP) across ${Math.round(canvas.tokens.get(actor.id)?.distanceTo?.(target)||30)} feet of battlefield. ${allyCount>0?`${allyCount} allies stand nearby. `:''}${enemyCount>1?`${enemyCount-1} other enemies lurk. `:''}Write one dramatic sentence describing ${actor.name}'s murderous intent.`;
+      const reply = await this._ollama.generate(prompt, { temperature: temp, timeout: 8000 });
+      if (reply && reply.length > 5) {
+        await ChatMessage.create({
+          user: game.userId, speaker: ChatMessage.getSpeaker({actor}),
+          content: `<div style="border-left:3px solid #8b5cf6;padding-left:8px;font-style:italic;">${reply.replace(/\n/g,'<br>')}</div>`
+        });
+        await this._wait(game.settings.get(MODULE_ID, 'ollamaNarrateDelay') || 800);
+      }
+    } catch(e) { this._log(`ollama target narrate: ${e.message}`); }
+  }
+
+  /* AI: action (hit/miss) narration */
+  static async _ollamaNarrateAction(actor, target, weapon, result) {
+    if (!this._ollamaEnabled || !game.settings.get(MODULE_ID, 'ollamaNarrateAction') || !target) return;
+    try {
+      const temp = game.settings.get(MODULE_ID, 'ollamaTemperature') || 0.7;
+      const prompt = `${this._ollamaSceneSnapshot()}\n\n${actor.name} ${result==='hit'?'strikes':'swings at'} ${target.name} with ${weapon?.name||'a weapon'}. Write one vivid, cinematic sentence describing the ${result==='hit'?'impact':'miss'}. No dialogue tags. No OOC text.`;
+      const reply = await this._ollama.generate(prompt, { temperature: temp, timeout: 8000 });
+      if (reply && reply.length > 5) {
+        await ChatMessage.create({
+          user: game.userId, speaker: ChatMessage.getSpeaker({actor}),
+          content: `<div style="border-left:3px solid ${result==='hit'?'#f87171':'#facc15'};padding-left:8px;font-style:italic;">${reply.replace(/\n/g,'<br>')}</div>`
+        });
+        await this._wait(game.settings.get(MODULE_ID, 'ollamaNarrateDelay') || 800);
+      }
+    } catch(e) { this._log(`ollama action narrate: ${e.message}`); }
+  }
+
+  /* AI: kill narration */
+  static async _ollamaNarrateKill(actor, target, weapon) {
+    if (!this._ollamaEnabled || !game.settings.get(MODULE_ID, 'ollamaNarrateKill') || !target) return;
+    try {
+      const temp = game.settings.get(MODULE_ID, 'ollamaTemperature') || 0.7;
+      const prompt = `${this._ollamaSceneSnapshot()}\n\n${actor.name} drops ${target.name} to the ground with ${weapon?.name||'a decisive blow'}. Write one dramatic cinematic sentence describing the moment the enemy falls. No dialogue tags. No OOC text.`;
+      const reply = await this._ollama.generate(prompt, { temperature: temp, timeout: 8000 });
+      if (reply && reply.length > 5) {
+        await ChatMessage.create({
+          user: game.userId, speaker: ChatMessage.getSpeaker({actor}),
+          content: `<div style="border-left:3px solid #ef4444;padding-left:8px;font-style:italic;font-weight:bold;">${reply.replace(/\n/g,'<br>')}</div>`
+        });
+        await this._wait(game.settings.get(MODULE_ID, 'ollamaNarrateDelay') || 800);
+      }
+    } catch(e) { this._log(`ollama kill narrate: ${e.message}`); }
+  }
+
+  /* AI: round start scene setting */
+  static async _ollamaNarrateRound(combat) {
+    if (!this._ollamaEnabled || !game.settings.get(MODULE_ID, 'ollamaNarrateRound') || !combat?.started) return;
+    try {
+      const temp = game.settings.get(MODULE_ID, 'ollamaTemperature') || 0.7;
+      const scene = this._ollamaSceneSnapshot();
+      const prompt = `${scene}\n\nThe battle rages. Write one atmospheric cinematic sentence describing the current state of the fight. Mention blood, steel, or spellfire. No dialogue tags. No OOC text.`;
+      const reply = await this._ollama.generate(prompt, { temperature: temp, timeout: 10000 });
+      if (reply && reply.length > 5) {
+        await ChatMessage.create({
+          user: game.userId, speaker: { alias: 'Battle Narrator' },
+          content: `<div style="border-left:3px solid #a78bfa;padding-left:8px;font-style:italic;opacity:.9;">${reply.replace(/\n/g,'<br>')}</div>`
+        });
+      }
+    } catch(e) { this._log(`ollama round narrate: ${e.message}`); }
+  }
+
+  /* ═══════════════════════════════════════════════════════════════════
      GM OVERRIDES
      ═══════════════════════════════════════════════════════════════════ */
   static _getOverrides(actor) {
@@ -1744,6 +1859,22 @@ ${actor.name} takes the **Help** action for ${ally.name}.`, actor);
       const prev = combat.combatants.get(prevId);
       if(!prev?.token?.actor || !prev.token.actor.hasPlayerOwner) return;
       this._legendaryHandler(combat, prev);
+    });
+  }
+
+  static _setupKillNarration() {
+    if(!game.user.isGM) return;
+    Hooks.on('updateToken', async (tokenDoc, change) => {
+      if(!NpcAutopilot._ollamaEnabled || !game.settings.get(MODULE_ID, 'ollamaNarrateKill')) return;
+      const newHP = change.actorData?.system?.attributes?.hp?.value;
+      if(newHP === undefined || newHP > 0) return;
+      const actor = tokenDoc.actor; if(!actor || !actor.hasPlayerOwner) return;
+      const combat = game.combat; if(!combat?.started) return;
+      const attacker = combat.combatant?.token?.actor;
+      if(!attacker || attacker.hasPlayerOwner) return;
+      const lastWeapon = attacker.getFlag(MODULE_ID, 'lastAttackWeapon') || '';
+      const weapon = attacker.items.find(i=>i.name===lastWeapon) || null;
+      await NpcAutopilot._ollamaNarrateKill(attacker, tokenDoc.object||tokenDoc, weapon);
     });
   }
 
