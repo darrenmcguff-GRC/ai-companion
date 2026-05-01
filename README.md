@@ -1,4 +1,4 @@
-# NPC Autopilot for Foundry VTT
+# NPC Autopilot for Foundry VTT (formerly AI Companion)
 
 Striped-down NPC combat autopilot for D&D 5e in Foundry VTT.
 
