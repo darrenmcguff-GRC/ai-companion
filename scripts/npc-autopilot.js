@@ -586,7 +586,7 @@ ${closeRes.msg}`, actor);
     }
 
     /* 4. Create / fetch the loot-pile actor */
-    let pileActor = this._getOrCreateLootActor();
+    let pileActor = await this._getOrCreateLootActor();
     if(!pileActor) return;
 
     /* 5. Build token data: item image, name, small scale */
