@@ -617,7 +617,7 @@ ${closeRes.msg}`, actor);
     this._log(`Dropped ${item.name} at [${snapped.x}, ${snapped.y}] → token ${placed.name}`);
   }
 
-  static _getOrCreateLootActor(){
+  static async _getOrCreateLootActor(){
     const cacheKey = '_lootActorId';
     let actor = game.actors.get(this[cacheKey]);
     if(actor) return actor;
@@ -630,7 +630,7 @@ ${closeRes.msg}`, actor);
     }
 
     /* Create a minimal loot-bearer NPC */
-    actor = Actor.create({
+    actor = await Actor.create({
       name: 'Dropped Weapons',
       type: 'npc',
       img: 'icons/svg/item-bag.svg',
