@@ -1,7 +1,7 @@
 const MODULE_ID = 'ai-companion';
 
 /* ═══════════════════════════════════════════════════════════════════
-   NPC AUTOPILOT v3.7.13 — Foundry VTT D&D 5e
+   NPC AUTOPILOT v3.7.14 — Foundry VTT D&D 5e
    Fix: moveRes shadow variable; melee standOff to 0/5ft; targeting pile-on penalty;
    switched Midi-QOL path to activity.use() for correct hit indicator.
    ═══════════════════════════════════════════════════════════════════ */
