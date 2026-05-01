@@ -1,0 +1,43 @@
+#!/bin/bash
+# Auto-bump patch version when module.json or JS changes
+set -e
+
+CHANGED=$(git diff --cached --name-only | grep -E '^(module\.json|scripts/npc-autopilot\.js)$' || true)
+if [ -z "$CHANGED" ]; then
+    exit 0
+fi
+
+# Read current version from module.json (staged version)
+MODULE_JSON=$(git show :module.json 2>/dev/null || cat module.json)
+CURRENT_VER=$(echo "$MODULE_JSON" | python3 -c "import sys,json; print(json.load(sys.stdin)['version'])")
+
+# Bump patch
+MAJOR=$(echo "$CURRENT_VER" | cut -d. -f1)
+MINOR=$(echo "$CURRENT_VER" | cut -d. -f2)
+PATCH=$(echo "$CURRENT_VER" | cut -d. -f3)
+NEW_VER="$MAJOR.$MINOR.$((PATCH + 1))"
+
+echo "Auto-bumping: $CURRENT_VER -> $NEW_VER"
+
+# Update module.json
+python3 -c "
+import json
+with open('module.json') as f: data = json.load(f)
+data['version'] = '$NEW_VER'
+with open('module.json', 'w') as f: json.dump(data, f, indent=2)
+f.write('\n')
+"
+
+# Update JS header comment
+sed -i "s/   NPC AUTOPILOT v[0-9.]* —/   NPC AUTOPILOT v$NEW_VER —/" scripts/npc-autopilot.js
+
+# Rebuild ZIP
+python3 -c "
+import zipfile, os
+with zipfile.ZipFile('npc-autopilot.zip','w',zipfile.ZIP_DEFLATED) as z:
+    for f in ['module.json','scripts/npc-autopilot.js','styles/npc-autopilot.css']:
+        z.write(f, f)
+print('ZIP rebuilt:', os.path.getsize('npc-autopilot.zip'), 'bytes')
+"
+
+git add module.json scripts/npc-autopilot.js npc-autopilot.zip
