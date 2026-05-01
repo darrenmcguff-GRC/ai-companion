@@ -715,8 +715,22 @@ ${moveRes.msg}`, actor); await this._stepDelay(); }
         const activity = this._attackActivity(item);
         if(activity && typeof activity.use === 'function'){
           try{
-            await activity.use({consume:false, createMessage:true}, {configureDialog:false});
-            midiUsed = true;
+            /* Monkey-patch rollAttack to inject target AC so dnd5e card renders hit/miss correctly */
+            const targetAC = targetToken?.actor?.system?.attributes?.ac?.value || 10;
+            const origRollAttack = activity.rollAttack?.bind(activity);
+            if(origRollAttack){
+              activity.rollAttack = async function(...args){
+                const config = args[0] || {};
+                if(!config.target) config.target = { value: targetAC };
+                return origRollAttack(...args);
+              };
+            }
+            try {
+              await activity.use({consume:false, createMessage:true}, {configureDialog:false});
+              midiUsed = true;
+            } finally {
+              if(origRollAttack) activity.rollAttack = origRollAttack;
+            }
           }catch(e1){ this._log(`midi activity.use() error: ${e1.message}`); }
         }
       }
