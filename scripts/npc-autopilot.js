@@ -1,7 +1,7 @@
 const MODULE_ID = 'ai-companion';
 
 /* ═══════════════════════════════════════════════════════════════════
-   NPC AUTOPILOT v3.8.1 — Foundry VTT D&D 5e
+   NPC AUTOPILOT v3.8.2 — Foundry VTT D&D 5e
    Ollama Bridge integration: AI dynamic narration for target locks,
    attacks, kills, and round openings. Soft dependency — safe without.
    ═══════════════════════════════════════════════════════════════════ */
