@@ -455,13 +455,6 @@ class NpcAutopilot {
           await this._npcAttack(actor, attackWeapon, targetToken, tokenDoc);
           actionUsed = true;
           await this._stepDelay();
-        } else if(attackWeapon && finalDist <= 60) {
-          /* ── Improvised throw: out of melee range, throw any melee weapon ── */
-          this._log(`improvised throw: ${attackWeapon.name} from ${Math.round(finalDist)}ft`);
-          await this._say(`🎯 ${actor.name} hurls ${attackWeapon.name} at ${targetToken.name}!`, actor);
-          await this._npcAttack(actor, attackWeapon, targetToken, tokenDoc);
-          actionUsed = true;
-          await this._stepDelay();
         } else if(attackWeapon) {
           await this._say(`⚠️ ${actor.name} is ${Math.round(finalDist)} ft from ${targetToken.name}, beyond ${attackWeapon.name}'s reach.`, actor, {whisper:true});
         }
@@ -538,11 +531,84 @@ ${closeRes.msg}`, actor);
   }
 
   static _isWeaponThrown(weapon){
-    if(!weapon)return false;
-    /* A weapon is "thrown" if its range is > 10 (i.e., not purely melee).
-       This handles all dnd5e versions regardless of property format. */
-    const range = this._getWeaponRange(weapon);
-    return range > 10;
+    if(!weapon) return false;
+    /* dnd5e stores the Thrown property in system.properties (varies by version)
+       or in the attack activity's properties. Also check weapon.name for
+       common thrown weapons as a robust fallback.
+       
+       dnd5e formats: "thr" or "thrown" as array strings, object keys, or Map keys.
+       dnd5e 3.x may store properties as null on system but available on activities. */
+    
+    /* 1. Check attack activity properties (most reliable across versions) */
+    const act = this._attackActivity(weapon);
+    if(act?.range?.long && !act?.range?.reach) {
+      /* A pure ranged weapon (bow, crossbow) has long range but no reach.
+         A thrown melee weapon has both reach/value AND long range. */
+      if(!act.range.value) return false;
+    }
+    if(act?.properties) {
+      if(this._checkThrownProperty(act.properties)) return true;
+    }
+    
+    /* 2. Check system.properties */  
+    const sysProps = weapon.system?.properties;
+    if(sysProps && this._checkThrownProperty(sysProps)) return true;
+    
+    /* 3. Check identification.identified.properties (dnd5e 3.x deferred) */
+    const idProps = foundry.utils.getProperty(weapon.system, 'identification.identified.properties');
+    if(idProps && this._checkThrownProperty(idProps)) return true;
+    
+    /* 4. Weapon name fallback for common thrown melee weapons */
+    const name = (weapon.name || '').toLowerCase();
+    if(/^(?:dagger|javelin|spear|trident|handaxe|light hammer|dart|net|throwing)/i.test(name)) return true;
+    
+    return false;
+  }
+  
+  static _checkThrownProperty(props){
+    /* ES6 Map format (dnd5e 3.x) */
+    if(props instanceof Map){
+      if(props.has('thr') || props.has('thrown')) return true;
+      for(const [key, val] of props.entries()){
+        if(/^thr(?:own)?$/i.test(key)) return true;
+        if(val && typeof val === 'object'){
+          const id = val.id || val.name || val._id || '';
+          if(/^thr(?:own)?$/i.test(id)) return true;
+        }
+      }
+      return false;
+    }
+    /* Array format */
+    if(Array.isArray(props)){
+      return props.some(p => {
+        if(typeof p === 'string') return /^thr(?:own)?$/i.test(p);
+        if(p && typeof p === 'object'){
+          const id = p.id || p.name || '';
+          return /^thr(?:own)?$/i.test(id);
+        }
+        return false;
+      });
+    }
+    /* Object format */
+    if(typeof props === 'object'){
+      for(const key of Object.keys(props)){
+        if(/^thr(?:own)?$/i.test(key)){
+          const val = props[key];
+          if(val === true || val === 1 || val === 'true') return true;
+          if(val && typeof val === 'object'){
+            const id = val.id || val.name || '';
+            if(/^thr(?:own)?$/i.test(id)) return true;
+          }
+        }
+        /* Check values for object-with-id format */
+        if(props[key] && typeof props[key] === 'object'){
+          const id = props[key].id || props[key].name || '';
+          if(/^thr(?:own)?$/i.test(id)) return true;
+        }
+      }
+      return false;
+    }
+    return false;
   }
 
   /* ═══════════════════════════════════════════════════════════════════
@@ -552,13 +618,10 @@ ${closeRes.msg}`, actor);
      ═══════════════════════════════════════════════════════════════════ */
   static async _dropThrownWeapon(actor, item, selfToken, targetToken, hit){
     const setting = game.settings.get(MODULE_ID, 'dropThrownWeapons');
-    const dist = this._tokenDistanceFt(selfToken, targetToken);
-    this._log(`_dropThrownWeapon: setting=${setting}, item=${item?.name}, dist=${Math.round(dist)}ft`);
+    this._log(`_dropThrownWeapon: setting=${setting}, item=${item?.name}, thrown=${this._isWeaponThrown(item)}`);
     if(!setting) return;
     if(!item || !selfToken || !targetToken) return;
-    /* Drop any weapon thrown at range (> 10 ft = improvised or proper thrown) */
-    if(dist <= 10) return;
-    this._log(`_dropThrownWeapon: dropping ${item.name}`);
+    if(!this._isWeaponThrown(item)) return;
 
     /* 1. Reduce quantity on the NPC, or remove if last one */
     let qty = item.system?.quantity ?? 1;
