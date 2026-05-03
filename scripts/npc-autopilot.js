@@ -34,6 +34,9 @@ Hooks.on('init', () => {
   game.settings.register(MODULE_ID, 'ollamaTemperature', { scope:'world', config:true, type:Number, default:0.7, name:'AI Temperature', hint:'Narration creativity: 0.0 deterministic, 1.0 very creative.'});
   game.settings.register(MODULE_ID, 'ollamaNarrateDelay', { scope:'world', config:true, type:Number, default:800, name:'Narration Pause (ms)', hint:'Pause after AI narration before continuing.'});
   game.settings.register(MODULE_ID, 'dropThrownWeapons', { scope:'world', config:true, type:Boolean, default:false, name:'Drop Thrown Weapons', hint:'When an NPC throws a weapon (dagger, javelin, handaxe, etc), reduce quantity by 1 and drop a loot token on the map.'});
+  game.settings.register(MODULE_ID, 'npcVision',       { scope:'world', config:true, type:Boolean, default:true,  name:'NPC Vision (LOS)', hint:'NPCs only target enemies they can see (line-of-sight). Falling back to last-known-position for hidden foes.'});
+  game.settings.register(MODULE_ID, 'npcDoorAware',    { scope:'world', config:true, type:Boolean, default:true,  name:'NPC Door Detection', hint:'NPCs detect and open doors when pathfinding to targets.'});
+  game.settings.register(MODULE_ID, 'npcPathfinding',  { scope:'world', config:true, type:Boolean, default:true,  name:'NPC Wall Pathfinding', hint:'NPCs navigate around walls and obstacles using pathfinding.'});
 });
 
 Hooks.on('ready', () => {
