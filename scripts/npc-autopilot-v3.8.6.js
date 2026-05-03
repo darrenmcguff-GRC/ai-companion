@@ -1,12 +1,10 @@
 const MODULE_ID = 'ai-companion';
 
 /* ═══════════════════════════════════════════════════════════════════
-   NPC AUTOPILOT v3.9.0 — Foundry VTT D&D 5e
+   NPC AUTOPILOT v3.8.6 — Foundry VTT D&D 5e
    Unified attack path: always use activity.rollAttack with target AC
    injected up-front so dnd5e hit/miss cards render correctly.
    Soft dependency — safe without.
-   Features: NPC Vision (LOS), Door Detection, Pathfinding,
-   Last-Known Position tracking, AI-enhanced movement.
    ═══════════════════════════════════════════════════════════════════ */
 
 /* ─── Settings ──────────────────────────────────────────────────── */
@@ -194,9 +192,6 @@ class NpcAutopilot {
         if(a==='toggle-reactions'){ game.settings.set(MODULE_ID,'reactionsEnabled',!game.settings.get(MODULE_ID,'reactionsEnabled')); NpcAutopilot._renderPanel(); }
         if(a==='toggle-legendary'){ game.settings.set(MODULE_ID,'legendaryEnabled',!game.settings.get(MODULE_ID,'legendaryEnabled')); NpcAutopilot._renderPanel(); }
         if(a==='toggle-ollama'){ game.settings.set(MODULE_ID,'ollamaEnabled',!game.settings.get(MODULE_ID,'ollamaEnabled')); NpcAutopilot._renderPanel(); }
-        if(a==='toggle-vision'){ game.settings.set(MODULE_ID,'npcVision',!game.settings.get(MODULE_ID,'npcVision')); NpcAutopilot._renderPanel(); }
-        if(a==='toggle-doors'){ game.settings.set(MODULE_ID,'npcDoorAware',!game.settings.get(MODULE_ID,'npcDoorAware')); NpcAutopilot._renderPanel(); }
-        if(a==='toggle-pathfinding'){ game.settings.set(MODULE_ID,'npcPathfinding',!game.settings.get(MODULE_ID,'npcPathfinding')); NpcAutopilot._renderPanel(); }
         if(a==='manual-turn'){ const c=game.combat?.combatant; if(c?.token?.actor) NpcAutopilot.takeTurn(c.token.actor,c.token); }
         if(a==='toggle-npc'){ const id=$(this).data('actor-id'); const a2=game.actors.get(id); if(a2) NpcAutopilot.setEnabled(a2, $(this).is(':checked')); }
         if(a==='override-npc'){ const id=$(this).data('actor-id'); const a2=game.actors.get(id); if(a2) NpcAutopilot._openActorOverride(a2); }
@@ -217,9 +212,6 @@ class NpcAutopilot {
     const reactions=game.settings.get(MODULE_ID,'reactionsEnabled');
     const legendary=game.settings.get(MODULE_ID,'legendaryEnabled');
     const ollamaOn=game.settings.get(MODULE_ID,'ollamaEnabled');
-    const visionOn=game.settings.get(MODULE_ID,'npcVision');
-    const doorOn=game.settings.get(MODULE_ID,'npcDoorAware');
-    const pathOn=game.settings.get(MODULE_ID,'npcPathfinding');
     const combat=game.combat; const active=combat?.started;
     const cur=combat?.combatant; const ct=cur?.token; const ca=ct?.actor; const isNPC=ca&&!ca.hasPlayerOwner;
     const currentArch = ca ? this._detectArchetype(ca) : '';
@@ -229,10 +221,7 @@ class NpcAutopilot {
       <span class="npc-ap-toggle ${narrative?'on':'off'}" data-ap-action="toggle-narrative"><i class="fas fa-book"></i> ${narrative?'NARR':'STD'}</span>
       <span class="npc-ap-toggle ${reactions?'on':'off'}" data-ap-action="toggle-reactions"><i class="fas fa-shield-alt"></i> ${reactions?'REACT':'NONE'}</span>
       <span class="npc-ap-toggle ${legendary?'on':'off'}" data-ap-action="toggle-legendary"><i class="fas fa-dragon"></i> ${legendary?'LEG':'NONE'}</span>
-      <span class="npc-ap-toggle ${ollamaOn?'on':'off'}" data-ap-action="toggle-ollama" title="AI Narration via Ollama Bridge"><i class="fas fa-brain"></i> ${ollamaOn?'AI':'OFF'}</span>
-      <span class="npc-ap-toggle ${visionOn?'on':'off'}" data-ap-action="toggle-vision" title="NPC Vision / Line of Sight"><i class="fas fa-eye"></i> ${visionOn?'LOS':'NO-LOS'}</span>
-      <span class="npc-ap-toggle ${doorOn?'on':'off'}" data-ap-action="toggle-doors" title="NPC Door Detection / Opening"><i class="fas fa-door-open"></i> ${doorOn?'DOORS':'NO-DR'}</span>
-      <span class="npc-ap-toggle ${pathOn?'on':'off'}" data-ap-action="toggle-pathfinding" title="NPC Wall Pathfinding"><i class="fas fa-route"></i> ${pathOn?'PATH':'NO-PF'}</span></div>`;
+      <span class="npc-ap-toggle ${ollamaOn?'on':'off'}" data-ap-action="toggle-ollama" title="AI Narration via Ollama Bridge"><i class="fas fa-brain"></i> ${ollamaOn?'AI':'OFF'}</span></div>`;
     html+=`<div class="npc-ap-combat-status" style="text-align:center;padding:4px;font-size:12px;">${active?'🎲 Round '+(combat.round||1)+', Turn '+((combat.turn||0)+1):'No combat'}</div>`;
     if(ct){ const hp=ca?.system?.attributes?.hp||{}; const p=Math.round((hp.value||0)/(hp.max||1)*100); const c=p>50?'#4ade80':p>25?'#facc15':'#f87171';
       html+=`<div class="npc-ap-card"><img src="${ct.texture?.src||ca?.img||'icons/svg/mystery-man.svg'}">
@@ -275,46 +264,16 @@ class NpcAutopilot {
 
       if(ov.blacklist?.length) enemyTokens = enemyTokens.filter(t=>!ov.blacklist.includes(t.id));
 
-      /* -- NPC Vision: filter to visible enemies, remember last-known positions -- */
-      const visionEnabled = game.settings.get(MODULE_ID, 'npcVision');
-      let visibleEnemyTokens = visionEnabled ? this._visibleEnemies(tokenDoc, enemyTokens) : enemyTokens;
-      if(visionEnabled) for(const t of visibleEnemyTokens) this._rememberPosition(tokenDoc, t);
-
-      this._log(`${actor.name} turn start — ${enemyTokens.length} PCs (${visibleEnemyTokens.length} visible), ${allyTokens.length} allies, HP ${Math.round(hpPct*100)}%, arch=${tactics.arch}`);
+      this._log(`${actor.name} turn start — ${enemyTokens.length} PCs, ${allyTokens.length} allies, HP ${Math.round(hpPct*100)}%, arch=${tactics.arch}`);
 
       const items = actor.items?.contents || [];
 
-      /* Target selection: prefer visible enemies; fall back to last-known positions */
-      let targetToken = null;
-      let isTargetFromMemory = false;
-      if(visibleEnemyTokens.length){
-        targetToken = this._pickTarget(visibleEnemyTokens, tokenDoc, actor, tactics);
-      } else if(enemyTokens.length && visionEnabled){
-        const nearest = enemyTokens
-          .map(t => ({token: t, dist: this._tokenDistanceFt(tokenDoc, t)}))
-          .sort((a,b) => a.dist - b.dist);
-        for(const e of nearest){
-          const lkp = this._getLastKnownPosition(e.token.id);
-          if(lkp){
-            targetToken = e.token;
-            isTargetFromMemory = true;
-            this._log('target from memory: ' + targetToken.name + ' (last seen at [' + lkp.x + ',' + lkp.y + '])');
-            break;
-          }
-        }
-        if(!targetToken){
-          targetToken = this._pickTarget(enemyTokens, tokenDoc, actor, tactics);
-          isTargetFromMemory = true;
-          this._log('no memory either; raw-picking ' + (targetToken?.name || ''));
-        }
-      } else {
-        targetToken = enemyTokens.length ? this._pickTarget(enemyTokens, tokenDoc, actor, tactics) : null;
-      }
+      let targetToken = enemyTokens.length ? this._pickTarget(enemyTokens, tokenDoc, actor, tactics) : null;
       if(ov.forceTarget){
         const forced = canvas.tokens.get(ov.forceTarget);
         if(forced && enemyTokens.find(t=>t.id===forced.id)) targetToken = forced;
       }
-      this._log(`locked target: ${targetToken?.name||'none'} (${visibleEnemyTokens.length} visible, ${enemyTokens.length} total)`);
+      this._log(`locked target: ${targetToken?.name||'none'} (${enemyTokens.length} enemies)`);
       if(targetToken) this._incrementTargetCount(targetToken);
 
       /* personality intro */
@@ -350,7 +309,7 @@ class NpcAutopilot {
           }
           if(moveTool){
             try{
-              moveRes = await this._npcMoveToTarget(tokenDoc, targetToken, moveTool, {tactics, desiredRange, fromMemory: isTargetFromMemory});
+              moveRes = await this._npcMoveToTarget(tokenDoc, targetToken, moveTool, {tactics, desiredRange});
             }catch(e){ this._log(`move error: ${e.message}`); moveRes={msg:'', movedFt:0}; }
           }
         }
@@ -366,7 +325,6 @@ class NpcAutopilot {
       if(movedRefreshed) tokenDoc = movedRefreshed.document || movedRefreshed;
       enemyTokens=this._findEnemyTokens(tokenDoc);
       if(ov.blacklist?.length) enemyTokens = enemyTokens.filter(t=>!ov.blacklist.includes(t.id));
-      visibleEnemyTokens = visionEnabled ? this._visibleEnemies(tokenDoc, enemyTokens) : enemyTokens;
 
       let finalTarget = targetToken;
       if(finalTarget && !enemyTokens.find(t=>t.id===finalTarget.id)){
@@ -1210,7 +1168,7 @@ ${moveRes.msg}`, actor); await this._stepDelay(); }
     try{ await doc.update(updates); }catch(e){ console.warn('[NPC Autopilot] _safeUpdate failed:', e.message); }
   }
   static async _npcMoveToTarget(selfToken, targetToken, weapon, opts={}){
-    if(!selfToken||!targetToken||!canvas?.grid)return{movedFt:0,msg:''};
+    if(!selfToken||!targetToken||!canvas?.grid)return'';
     const self=selfToken.document||selfToken;
     const target=targetToken.document||targetToken;
     const gridDist=canvas.grid.distance||5;
@@ -1273,40 +1231,7 @@ ${moveRes.msg}`, actor); await this._stepDelay(); }
     }
 
     const snapped=canvas.grid.getSnappedPoint?canvas.grid.getSnappedPoint({x:dest.x,y:dest.y},{mode:CONST.GRID_SNAPPING_MODES.CENTER}):dest;
-
-    /* -- Door detection: try to open blocking doors before checking collision -- */
-    if(game.settings.get(MODULE_ID, 'npcDoorAware')){
-      const blockingDoor = this._findBlockingDoor({x:self.x,y:self.y}, snapped);
-      if(blockingDoor){
-        const opened = await this._tryOpenDoor(blockingDoor);
-        if(opened){
-          const snapped2=canvas.grid.getSnappedPoint?canvas.grid.getSnappedPoint({x:dest.x,y:dest.y},{mode:CONST.GRID_SNAPPING_MODES.CENTER}):dest;
-          const hit2=CONFIG.Canvas.polygonBackends?.move?.testCollision?CONFIG.Canvas.polygonBackends.move.testCollision({x:self.x,y:self.y}, snapped2, {type:'move',mode:'any'}):false;
-          if(!hit2){
-            const movedFt2=Math.round((Math.hypot(snapped2.x-self.x, snapped2.y-self.y)/gridPx)*gridDist);
-            await this._safeUpdate(selfToken, {x:snapped2.x,y:snapped2.y});
-            return {msg:`${selfToken.name} opens a door and advances.`, movedFt:movedFt2};
-          }
-        }
-      }
-    }
-
-    /* -- Pathfinding: try to navigate around walls -- */
     const hit=CONFIG.Canvas.polygonBackends?.move?.testCollision?CONFIG.Canvas.polygonBackends.move.testCollision({x:self.x,y:self.y}, snapped, {type:'move',mode:'any'}):false;
-
-    if(hit && game.settings.get(MODULE_ID, 'npcPathfinding')){
-      const waypoints = this._getPathwaypoints({x:self.x,y:self.y}, {x:snapped.x,y:snapped.y});
-      if(waypoints?.length){
-        const pfResult = await this._moveAlongPath(selfToken, waypoints, maxMovePx, gridPx, gridDist);
-        if(pfResult.movedFt > 0){
-          const pfMsg = opts.fromMemory
-            ? selfToken.name + ' investigates.'
-            : selfToken.name + ' navigates around obstacles toward ' + targetToken.name + '.';
-          return {msg: pfMsg, movedFt: pfResult.movedFt};
-        }
-      }
-    }
-
     const movedFt=Math.round((Math.hypot(snapped.x-self.x, snapped.y-self.y)/gridPx)*gridDist);
 
     if(hit){
@@ -1339,14 +1264,6 @@ ${moveRes.msg}`, actor); await this._stepDelay(); }
     const movedFt=Math.round((Math.hypot(snapped.x-self.x, snapped.y-self.y)/gridPx)*gd);
     const hit=CONFIG.Canvas.polygonBackends?.move?.testCollision?CONFIG.Canvas.polygonBackends.move.testCollision({x:self.x,y:self.y}, snapped, {type:'move',mode:'any'}):false;
     if(hit){
-      /* Try pathfinding for retreat */
-      if(game.settings.get(MODULE_ID, 'npcPathfinding')){
-        const waypoints = this._getPathwaypoints({x:self.x,y:self.y}, {x:snapped.x,y:snapped.y});
-        if(waypoints?.length){
-          const pfResult = await this._moveAlongPath(selfToken, waypoints, maxPx, gridPx, gd);
-          if(pfResult.movedFt > 0) return {msg:`${selfToken.name} retreats around obstacles.`, movedFt: pfResult.movedFt};
-        }
-      }
       const safe=this._findSafePosition(self,snapped,maxPx);
       if(safe){ await this._safeUpdate(selfToken, {x:safe.x,y:safe.y}); return {msg:`${selfToken.name} falls back cautiously.`, movedFt:Math.round((Math.hypot(safe.x-self.x, safe.y-self.y)/gridPx)*gd)}; }
       return {msg:`${selfToken.name} holds position.`, movedFt:0};

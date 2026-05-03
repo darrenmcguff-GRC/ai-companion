@@ -20,24 +20,25 @@ NEW_VER="$MAJOR.$MINOR.$((PATCH + 1))"
 echo "Auto-bumping: $CURRENT_VER -> $NEW_VER"
 
 # Update module.json
-python3 -c "
+python3 <<PYEOF
 import json
 with open('module.json') as f: data = json.load(f)
 data['version'] = '$NEW_VER'
-with open('module.json', 'w') as f: json.dump(data, f, indent=2)
-f.write('\n')
-"
+with open('module.json', 'w') as f:
+    json.dump(data, f, indent=2)
+    f.write('\n')
+PYEOF
 
 # Update JS header comment
 sed -i "s/   NPC AUTOPILOT v[0-9.]* —/   NPC AUTOPILOT v$NEW_VER —/" scripts/npc-autopilot.js
 
 # Rebuild ZIP
-python3 -c "
+python3 <<PYEOF
 import zipfile, os
 with zipfile.ZipFile('npc-autopilot.zip','w',zipfile.ZIP_DEFLATED) as z:
     for f in ['module.json','scripts/npc-autopilot.js','styles/npc-autopilot.css']:
         z.write(f, f)
 print('ZIP rebuilt:', os.path.getsize('npc-autopilot.zip'), 'bytes')
-"
+PYEOF
 
 git add module.json scripts/npc-autopilot.js npc-autopilot.zip
