@@ -1,7 +1,7 @@
 const MODULE_ID = 'ai-companion';
 
 /* ═══════════════════════════════════════════════════════════════════
-   NPC AUTOPILOT v3.9.4 — Foundry VTT D&D 5e
+   NPC AUTOPILOT v3.9.5 — Foundry VTT D&D 5e
    Unified attack path: always use activity.rollAttack with target AC
    injected up-front so dnd5e hit/miss cards render correctly.
    Soft dependency — safe without.
@@ -1500,7 +1500,7 @@ ${moveRes.msg}`, actor); await this._stepDelay(); }
       const tx = t.document?.x ?? t.x ?? 0, ty = t.document?.y ?? t.y ?? 0;
       /* Wall LOS check via geometry-level collision */
       try {
-        const ray = new Ray(
+        const ray = new foundry.canvas.geometry.Ray(
           {x: cx, y: cy},
           {x: tx, y: ty}
         );
@@ -1801,7 +1801,7 @@ ${moveRes.msg}`, actor); await this._stepDelay(); }
     if (scene?.name) terrain.push(`in ${scene.name}`);
     if (aToken && target) {
       try {
-        const ray = new Ray(aToken.center, target.center || aToken.center);
+        const ray = new foundry.canvas.geometry.Ray(aToken.center, target.center || aToken.center);
         const hasWall = canvas.walls?.checkCollision?.(ray, { type: 'sight', mode: 'any' });
         terrain.push(hasWall ? 'obscured sightline' : 'clear sightline');
       } catch(e) { /* skip wall check */ }

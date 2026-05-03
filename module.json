@@ -1,8 +1,8 @@
 {
   "id": "ai-companion",
   "title": "NPC Autopilot",
-  "description": "Foundry VTT NPC combat autopilot for D&D 5e. v3.9.4: add missing door detection + pathfinding methods. v3.9.3: fix wall LOS blocking. v3.9.2: add vision methods. v3.9.0: NPC Vision, door detection, pathfinding.",
-  "version": "3.9.4",
+  "description": "Foundry VTT NPC combat autopilot for D&D 5e. v3.9.5: replace deprecated global Ray with foundry.canvas.geometry.Ray (v13+ compat). v3.9.0: NPC Vision, door detection, pathfinding.",
+  "version": "3.9.5",
   "authors": [
     {
       "name": "Steve"
