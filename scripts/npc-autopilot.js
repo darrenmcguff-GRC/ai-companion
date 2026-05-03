@@ -1,7 +1,7 @@
 const MODULE_ID = 'ai-companion';
 
 /* ═══════════════════════════════════════════════════════════════════
-   NPC AUTOPILOT v3.10.3 — Foundry VTT D&D 5e
+   NPC AUTOPILOT v3.10.5 — Foundry VTT D&D 5e
    Unified attack path: always use activity.rollAttack with target AC
    injected up-front so dnd5e hit/miss cards render correctly.
    Soft dependency — safe without.
@@ -72,6 +72,12 @@ Hooks.on('updateCombat', (combat, changed) => {
   if (!NpcAutopilot.isEnabled(c.token.actor)) return;
   if (NpcAutopilot._isPaused(c.token.actor)) return;
   NpcAutopilot.takeTurn(c.token.actor, c.token);
+});
+
+/* Combat deleted → clear last-known positions so memory doesn't persist between encounters */
+Hooks.on('deleteCombat', () => {
+  NpcAutopilot._lastKnownPositions = new Map();
+  NpcAutopilot._log('last-known positions cleared (combat deleted)');
 });
 
 /* ═══════════════════════════════════════════════════════════════════

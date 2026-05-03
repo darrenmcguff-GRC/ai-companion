@@ -1,8 +1,8 @@
 {
   "id": "ai-companion",
   "title": "NPC Autopilot",
-  "description": "Foundry VTT NPC combat autopilot for D&D 5e. v3.10.2: LOS re-check in _executeFullTurn \u2014 memory-targeted NPCs can't attack through walls. V14 verified.",
-  "version": "3.10.3",
+  "description": "Foundry VTT NPC combat autopilot for D&D 5e. v3.10.4: last-known positions reset between encounters (deleteCombat hook). V14 verified.",
+  "version": "3.10.5",
   "authors": [
     {
       "name": "Steve"
