@@ -1,8 +1,8 @@
 {
   "id": "ai-companion",
   "title": "NPC Autopilot",
-  "description": "Foundry VTT NPC combat autopilot for D&D 5e. v3.9.6: fix LOS (use token center coords + polygonBackends.sight.testCollision), fix pathfinding (perpendicular sweeps, 48 candidate waypoints), fix _findSafePosition wall-side fallback. v3.9.0: NPC Vision, doors, pathfinding.",
-  "version": "3.9.6",
+  "description": "Foundry VTT NPC combat autopilot for D&D 5e. v3.9.7: LOS fix \u2014 center coordinates + canvas.walls.checkCollision(ray, type:sight). No more polygonBackends confusion.",
+  "version": "3.9.7",
   "authors": [
     {
       "name": "Steve"

@@ -1,7 +1,7 @@
 const MODULE_ID = 'ai-companion';
 
 /* ═══════════════════════════════════════════════════════════════════
-   NPC AUTOPILOT v3.9.6 — Foundry VTT D&D 5e
+   NPC AUTOPILOT v3.9.7 — Foundry VTT D&D 5e
    Unified attack path: always use activity.rollAttack with target AC
    injected up-front so dnd5e hit/miss cards render correctly.
    Soft dependency — safe without.
@@ -1519,27 +1519,34 @@ ${moveRes.msg}`, actor); await this._stepDelay(); }
   static _lastKnownPositions = new Map();
 
   static _visibleEnemies(selfToken, enemyTokens){
-    if(!canvas?.walls || !canvas?.scene) return enemyTokens;
-    const selfPlaceable = selfToken.object || (canvas.tokens?.get(selfToken.id)?.object) || null;
-    if(!selfPlaceable) return enemyTokens;
-    /* Use token center, not top-left corner */
-    const origin = {
-      x: selfPlaceable.center?.x ?? (selfPlaceable.document?.x ?? 0) + ((selfPlaceable.w ?? selfPlaceable.document?.width ?? 1) * (canvas.grid.size || 100) / 2),
-      y: selfPlaceable.center?.y ?? (selfPlaceable.document?.y ?? 0) + ((selfPlaceable.h ?? selfPlaceable.document?.height ?? 1) * (canvas.grid.size || 100) / 2)
-    };
-    return enemyTokens.filter(t => {
-      const tPlaceable = t.object || (canvas.tokens?.get(t.id)?.object) || t;
-      const tx = tPlaceable.center?.x ?? (t.document?.x ?? t.x ?? 0) + ((t.document?.width ?? 1) * (canvas.grid.size || 100) / 2);
-      const ty = tPlaceable.center?.y ?? (t.document?.y ?? t.y ?? 0) + ((t.document?.height ?? 1) * (canvas.grid.size || 100) / 2);
-      /* Wall LOS check via polygon-based sight collision */
+    if(!canvas?.walls || !canvas?.scene){ this._log('_visibleEnemies: no walls or scene'); return enemyTokens; }
+    const selfDoc = selfToken.document || selfToken;
+    if(selfDoc?.x === undefined && selfDoc?.y === undefined){ this._log('_visibleEnemies: no coords'); return enemyTokens; }
+    const gs = canvas.grid.size || 100;
+    const sx = (selfDoc.x ?? 0) + ((selfDoc.width ?? 1) * gs) / 2;
+    const sy = (selfDoc.y ?? 0) + ((selfDoc.height ?? 1) * gs) / 2;
+    this._log(`_visibleEnemies: from=(${Math.round(sx)},${Math.round(sy)}) ${selfDoc?.name||'?'}`);
+    const visible = [];
+    for(const t of enemyTokens){
+      const tDoc = t.document || t;
+      if(tDoc?.x === undefined) continue;
+      const tx = (tDoc.x ?? 0) + ((tDoc.width ?? 1) * gs) / 2;
+      const ty = (tDoc.y ?? 0) + ((tDoc.height ?? 1) * gs) / 2;
       try {
-        const hit = CONFIG.Canvas.polygonBackends?.sight?.testCollision
-          ? CONFIG.Canvas.polygonBackends.sight.testCollision(origin, {x: tx, y: ty}, {type:'sight', mode:'any'})
-          : canvas.walls?.checkCollision?.(new foundry.canvas.geometry.Ray(origin, {x: tx, y: ty}), {type: 'sight', mode: 'any'});
-        if(hit) return false;
-      } catch(e) { /* if check fails, assume visible */ }
-      return true;
-    });
+        const ray = new foundry.canvas.geometry.Ray({x: sx, y: sy}, {x: tx, y: ty});
+        const blocked = canvas.walls.checkCollision(ray, {type: 'sight', mode: 'any'});
+        if(blocked){
+          this._log(`_visibleEnemies: ${tDoc?.name||'?'} BLOCKED`);
+          continue;
+        }
+        visible.push(t);
+      } catch(e) {
+        this._log(`_visibleEnemies: err ${tDoc?.name||'?'}: ${e.message?.substring(0,60)}`);
+        continue;
+      }
+    }
+    this._log(`_visibleEnemies: ${visible.length}/${enemyTokens.length} visible`);
+    return visible;
   }
 
   static _rememberPosition(selfToken, targetToken){
