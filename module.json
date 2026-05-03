@@ -1,8 +1,8 @@
 {
   "id": "ai-companion",
   "title": "NPC Autopilot",
-  "description": "Foundry VTT NPC combat autopilot for D&D 5e. v3.9.8: LOS fix \u2014 CONFIG.Canvas.polygonBackends.sight.testCollision(origin, dest, opts) with point objects, not Ray. No walls ignored anymore.",
-  "version": "3.9.9",
+  "description": "Foundry VTT NPC combat autopilot for D&D 5e. v3.10.0: V14 verified. LOS uses polygonBackends.sight.testCollision(point, point, opts). 0-visible skips turn. Pathfinding uses polygonBackends.move.testCollision.",
+  "version": "3.10.1",
   "authors": [
     {
       "name": "Steve"
@@ -33,7 +33,7 @@
   },
   "compatibility": {
     "minimum": "12",
-    "verified": "13"
+    "verified": "14"
   },
   "download": "https://github.com/darrenmcguff-GRC/npc-autopilot/archive/refs/heads/main.zip",
   "manifest": "https://raw.githubusercontent.com/darrenmcguff-GRC/npc-autopilot/main/module.json"
