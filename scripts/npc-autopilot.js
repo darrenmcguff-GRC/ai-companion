@@ -1,7 +1,7 @@
 const MODULE_ID = 'ai-companion';
 
 /* ═══════════════════════════════════════════════════════════════════
-   NPC AUTOPILOT v3.9.3 — Foundry VTT D&D 5e
+   NPC AUTOPILOT v3.9.4 — Foundry VTT D&D 5e
    Unified attack path: always use activity.rollAttack with target AC
    injected up-front so dnd5e hit/miss cards render correctly.
    Soft dependency — safe without.
@@ -1401,6 +1401,56 @@ ${moveRes.msg}`, actor); await this._stepDelay(); }
     return{x:fx, y:fy};
   }
 
+  /* ── Pathfinding ──────────────────────────────────────────── */
+  /* Simple pathfinding: check cardinal + diagonal offsets around obstacles */
+  static _getPathwaypoints(from, to){
+    const gridSize = canvas.grid.size || 100;
+    const offset = gridSize * 1.5;
+    const candidates = [
+      {x: from.x, y: to.y},
+      {x: to.x, y: from.y},
+      {x: from.x - offset, y: to.y},
+      {x: from.x + offset, y: to.y},
+      {x: to.x, y: from.y - offset},
+      {x: to.x, y: from.y + offset},
+    ];
+    const waypoints = [];
+    for(const pt of candidates){
+      const hit = CONFIG.Canvas.polygonBackends?.move?.testCollision ? CONFIG.Canvas.polygonBackends.move.testCollision(from, pt, {type:'move',mode:'any'}) : false;
+      if(!hit){
+        const hit2 = CONFIG.Canvas.polygonBackends?.move?.testCollision ? CONFIG.Canvas.polygonBackends.move.testCollision(pt, to, {type:'move',mode:'any'}) : false;
+        if(!hit2){
+          waypoints.push(pt);
+        }
+      }
+    }
+    /* Sort by total distance from + to */
+    waypoints.sort((a,b) => {
+      const da = Math.hypot(a.x-from.x, a.y-from.y) + Math.hypot(to.x-a.x, to.y-a.y);
+      const db = Math.hypot(b.x-from.x, b.y-from.y) + Math.hypot(to.x-b.x, to.y-b.y);
+      return da - db;
+    });
+    return waypoints.slice(0, 1); /* return shortest path */
+  }
+
+  static async _moveAlongPath(selfToken, waypoints, maxMovePx, gridPx, gridDist){
+    let totalMovedFt = 0;
+    let cur = {x: selfToken.x || selfToken.document?.x || 0, y: selfToken.y || selfToken.document?.y || 0};
+    for(const wp of waypoints){
+      const segDist = Math.hypot(wp.x - cur.x, wp.y - cur.y);
+      if(segDist > maxMovePx) break;
+      const hit = CONFIG.Canvas.polygonBackends?.move?.testCollision ? CONFIG.Canvas.polygonBackends.move.testCollision(cur, wp, {type:'move',mode:'any'}) : false;
+      if(hit) continue;
+      const snapped = canvas.grid.getSnappedPoint ? canvas.grid.getSnappedPoint({x:wp.x,y:wp.y},{mode:CONST.GRID_SNAPPING_MODES.CENTER}) : wp;
+      await this._safeUpdate(selfToken, {x:snapped.x,y:snapped.y});
+      const movedFt = Math.round((segDist / gridPx) * gridDist);
+      totalMovedFt += movedFt;
+      maxMovePx -= segDist;
+      cur = snapped;
+    }
+    return {movedFt: totalMovedFt};
+  }
+
   static _findSafePosition(self,targetDest,maxDist){
     const steps=20; const dx=targetDest.x-self.x, dy=targetDest.y-self.y; const dist=Math.hypot(dx,dy)||1;
     for(let i=steps;i>=1;i--){
@@ -1474,6 +1524,45 @@ ${moveRes.msg}`, actor); await this._stepDelay(); }
     /* Purge positions from old scenes */
     if(pos.scene !== canvas.scene?.id) return null;
     return pos;
+  }
+
+  /* ── Door detection ──────────────────────────────────────────── */
+  static _findBlockingDoor(fromPt, toPt){
+    if(!canvas?.walls) return null;
+    const dx = toPt.x - fromPt.x, dy = toPt.y - fromPt.y;
+    const dist = Math.hypot(dx, dy);
+    if(dist < 1) return null;
+    const x1=fromPt.x, y1=fromPt.y, x2=toPt.x, y2=toPt.y;
+    let best = null, bestDist = Infinity;
+    for(const w of canvas.walls.placeables){
+      if(!w.document?.door) continue;
+      if(w.document?.ds !== 0) continue; /* closed */
+      /* Wall segment A→B coordinates */
+      const ax = w.document?.tX ?? w.tX, ay = w.document?.tY ?? w.tY;
+      const bx = w.document?._tX ?? w._tX, by = w.document?._tY ?? w._tY;
+      /* Line segment intersection test */
+      const denom = (bx-ax)*(y1-y2) - (by-ay)*(x1-x2);
+      if(Math.abs(denom) < 0.001) continue;
+      const t = ((ax-x1)*(y1-y2) - (ay-y1)*(x1-x2)) / denom;
+      const u = -((ax-x1)*(by-ay) - (ay-y1)*(bx-ax)) / denom;
+      if(t>=0 && t<=1 && u>=0 && u<=1){
+        const ix = ax + t*(bx-ax), iy = ay + t*(by-ay);
+        const d = Math.hypot(ix-fromPt.x, iy-fromPt.y);
+        if(d < bestDist){ best = w; bestDist = d; }
+      }
+    }
+    return best;
+  }
+
+  static async _tryOpenDoor(doorWall){
+    if(!doorWall?.document?.door) return false;
+    try {
+      await doorWall.document.update({ds: 1});
+      return true;
+    } catch(e) {
+      this._log('failed to open door: ' + e.message);
+      return false;
+    }
   }
 
   /* ═══════════════════════════════════════════════════════════════════
