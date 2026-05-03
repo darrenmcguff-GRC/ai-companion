@@ -1,8 +1,8 @@
 {
   "id": "ai-companion",
   "title": "NPC Autopilot",
-  "description": "Foundry VTT NPC combat autopilot for D&D 5e. v3.10.0: V14 verified. LOS uses polygonBackends.sight.testCollision(point, point, opts). 0-visible skips turn. Pathfinding uses polygonBackends.move.testCollision.",
-  "version": "3.10.1",
+  "description": "Foundry VTT NPC combat autopilot for D&D 5e. v3.10.2: LOS re-check in _executeFullTurn \u2014 memory-targeted NPCs can't attack through walls. V14 verified.",
+  "version": "3.10.3",
   "authors": [
     {
       "name": "Steve"

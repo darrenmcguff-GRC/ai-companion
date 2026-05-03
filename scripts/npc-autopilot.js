@@ -1,7 +1,7 @@
 const MODULE_ID = 'ai-companion';
 
 /* ═══════════════════════════════════════════════════════════════════
-   NPC AUTOPILOT v3.10.1 — Foundry VTT D&D 5e
+   NPC AUTOPILOT v3.10.3 — Foundry VTT D&D 5e
    Unified attack path: always use activity.rollAttack with target AC
    injected up-front so dnd5e hit/miss cards render correctly.
    Soft dependency — safe without.
@@ -392,6 +392,15 @@ class NpcAutopilot {
      ═══════════════════════════════════════════════════════════════════ */
   static async _executeFullTurn(actor, tokenDoc, enemyTokens, allyTokens, hpPct, targetToken, moveBudgetFt=0, tactics, overrides={}) {
     this._log(`_executeFullTurn: ${actor.name} — ${enemyTokens.length} enemies, HP ${Math.round(hpPct*100)}%, target=${targetToken?.name||'none'}, moveLeft=${moveBudgetFt}, arch=${tactics?.arch||'default'}`);
+    /* ── LOS re-check: if vision is ON and target is behind walls, don't attack ── */
+    const visionCheck = game.settings.get(MODULE_ID, 'npcVision');
+    if(visionCheck && targetToken){
+      const visibleNow = this._visibleEnemies(tokenDoc, [targetToken]);
+      if(visibleNow.length === 0){
+        this._log(`target ${targetToken.name} not visible — skipping attacks (can still search)`);
+        targetToken = null;
+      }
+    }
     const items = actor.items?.contents || [];
     const moveBudget = { ft: moveBudgetFt };
     let bonusUsed = false;
