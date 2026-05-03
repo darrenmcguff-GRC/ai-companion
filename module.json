@@ -1,8 +1,8 @@
 {
   "id": "ai-companion",
   "title": "NPC Autopilot",
-  "description": "Foundry VTT NPC combat autopilot for D&D 5e. v3.9.0: NPC Vision (line-of-sight) targeting, door detection & opening, wall-aware pathfinding, last-known-position fallback for hidden enemies. v3.8.4: native thrown-weapon drops. v3.8.0: Ollama Bridge AI narration. Soft dependency \u2014 safe without.",
-  "version": "3.9.0",
+  "description": "Foundry VTT NPC combat autopilot for D&D 5e. v3.9.1: fix unregistered settings crash (npcVision, npcDoorAware, npcPathfinding now registered on init). v3.9.0: NPC Vision (LOS), door detection, wall-aware pathfinding, last-known-position tracking. v3.8.4: native thrown-weapon drops. v3.8.0: Ollama Bridge AI narration.",
+  "version": "3.9.1",
   "authors": [
     {
       "name": "Steve"
