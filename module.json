@@ -1,8 +1,8 @@
 {
   "id": "ai-companion",
   "title": "NPC Autopilot",
-  "description": "Foundry VTT NPC combat autopilot for D&D 5e. v3.9.5: replace deprecated global Ray with foundry.canvas.geometry.Ray (v13+ compat). v3.9.0: NPC Vision, door detection, pathfinding.",
-  "version": "3.9.5",
+  "description": "Foundry VTT NPC combat autopilot for D&D 5e. v3.9.6: fix LOS (use token center coords + polygonBackends.sight.testCollision), fix pathfinding (perpendicular sweeps, 48 candidate waypoints), fix _findSafePosition wall-side fallback. v3.9.0: NPC Vision, doors, pathfinding.",
+  "version": "3.9.6",
   "authors": [
     {
       "name": "Steve"

@@ -1,7 +1,7 @@
 const MODULE_ID = 'ai-companion';
 
 /* ═══════════════════════════════════════════════════════════════════
-   NPC AUTOPILOT v3.9.5 — Foundry VTT D&D 5e
+   NPC AUTOPILOT v3.9.6 — Foundry VTT D&D 5e
    Unified attack path: always use activity.rollAttack with target AC
    injected up-front so dnd5e hit/miss cards render correctly.
    Soft dependency — safe without.
@@ -1402,27 +1402,40 @@ ${moveRes.msg}`, actor); await this._stepDelay(); }
   }
 
   /* ── Pathfinding ──────────────────────────────────────────── */
-  /* Simple pathfinding: check cardinal + diagonal offsets around obstacles */
+  /* Find a waypoint around a wall by testing points along a perpendicular offset */
   static _getPathwaypoints(from, to){
     const gridSize = canvas.grid.size || 100;
-    const offset = gridSize * 1.5;
-    const candidates = [
-      {x: from.x, y: to.y},
-      {x: to.x, y: from.y},
-      {x: from.x - offset, y: to.y},
-      {x: from.x + offset, y: to.y},
-      {x: to.x, y: from.y - offset},
-      {x: to.x, y: from.y + offset},
-    ];
+    /* Try multiple offsets in both directions from the direct path */
+    const dx = to.x - from.x, dy = to.y - from.y;
+    const dist = Math.hypot(dx, dy) || 1;
+    const nx = -dy / dist, ny = dx / dist; /* perpendicular unit vector */
+    const offsets = [1.5, 2.5, 4, 6, 8, 10].map(m => m * gridSize);
+    const candidates = [];
+    for(const off of offsets){
+      const mid = {x: (from.x + to.x) / 2, y: (from.y + to.y) / 2};
+      candidates.push({x: mid.x + nx * off, y: mid.y + ny * off});
+      candidates.push({x: mid.x - nx * off, y: mid.y - ny * off});
+      /* Also try near the start and end points */
+      const nearStart = {x: from.x + dx * 0.25, y: from.y + dy * 0.25};
+      candidates.push({x: nearStart.x + nx * off, y: nearStart.y + ny * off});
+      candidates.push({x: nearStart.x - nx * off, y: nearStart.y - ny * off});
+      const nearEnd = {x: from.x + dx * 0.75, y: from.y + dy * 0.75};
+      candidates.push({x: nearEnd.x + nx * off, y: nearEnd.y + ny * off});
+      candidates.push({x: nearEnd.x - nx * off, y: nearEnd.y - ny * off});
+    }
     const waypoints = [];
+    const tested = new Set();
     for(const pt of candidates){
-      const hit = CONFIG.Canvas.polygonBackends?.move?.testCollision ? CONFIG.Canvas.polygonBackends.move.testCollision(from, pt, {type:'move',mode:'any'}) : false;
-      if(!hit){
-        const hit2 = CONFIG.Canvas.polygonBackends?.move?.testCollision ? CONFIG.Canvas.polygonBackends.move.testCollision(pt, to, {type:'move',mode:'any'}) : false;
-        if(!hit2){
-          waypoints.push(pt);
-        }
-      }
+      const key = Math.round(pt.x/50)+','+Math.round(pt.y/50);
+      if(tested.has(key)) continue;
+      tested.add(key);
+      const hit1 = CONFIG.Canvas.polygonBackends?.move?.testCollision
+        ? CONFIG.Canvas.polygonBackends.move.testCollision(from, pt, {type:'move',mode:'any'}) : false;
+      if(hit1) continue;
+      const hit2 = CONFIG.Canvas.polygonBackends?.move?.testCollision
+        ? CONFIG.Canvas.polygonBackends.move.testCollision(pt, to, {type:'move',mode:'any'}) : false;
+      if(hit2) continue;
+      waypoints.push(pt);
     }
     /* Sort by total distance from + to */
     waypoints.sort((a,b) => {
@@ -1430,7 +1443,7 @@ ${moveRes.msg}`, actor); await this._stepDelay(); }
       const db = Math.hypot(b.x-from.x, b.y-from.y) + Math.hypot(to.x-b.x, to.y-b.y);
       return da - db;
     });
-    return waypoints.slice(0, 1); /* return shortest path */
+    return waypoints.slice(0, 1);
   }
 
   static async _moveAlongPath(selfToken, waypoints, maxMovePx, gridPx, gridDist){
@@ -1451,13 +1464,27 @@ ${moveRes.msg}`, actor); await this._stepDelay(); }
     return {movedFt: totalMovedFt};
   }
 
-  static _findSafePosition(self,targetDest,maxDist){
+  static _findSafePosition(self, targetDest, maxDist){
+    /* First try: slide along the direct path (original behaviour) */
     const steps=20; const dx=targetDest.x-self.x, dy=targetDest.y-self.y; const dist=Math.hypot(dx,dy)||1;
     for(let i=steps;i>=1;i--){
       const f=(i/steps)*Math.min(1,maxDist/dist);
       const px=self.x+dx*f, py=self.y+dy*f;
       const hit=CONFIG.Canvas.polygonBackends?.move?.testCollision?CONFIG.Canvas.polygonBackends.move.testCollision({x:self.x,y:self.y},{x:px,y:py},{type:'move',mode:'any'}):false;
       if(!hit)return{x:px,y:py};
+    }
+    /* Second try: perpendicular to the direct path (walk along wall face) */
+    const nx=-dy/dist, ny=dx/dist; /* perpendicular unit */
+    const gridSize=canvas.grid.size||100;
+    for(let side=-1;side<=1;side+=2){
+      for(let step=1;step<=5;step++){
+        const off=step*gridSize*side;
+        const px=self.x+nx*off, py=self.y+ny*off;
+        const d=Math.hypot(px-self.x, py-self.y);
+        if(maxDist!==undefined && d>maxDist) continue;
+        const hit=CONFIG.Canvas.polygonBackends?.move?.testCollision?CONFIG.Canvas.polygonBackends.move.testCollision({x:self.x,y:self.y},{x:px,y:py},{type:'move',mode:'any'}):false;
+        if(!hit) return{x:px,y:py};
+      }
     }
     return null;
   }
@@ -1493,19 +1520,24 @@ ${moveRes.msg}`, actor); await this._stepDelay(); }
 
   static _visibleEnemies(selfToken, enemyTokens){
     if(!canvas?.walls || !canvas?.scene) return enemyTokens;
-    const self = selfToken.object || selfToken;
-    const cx = self.document?.x ?? self.x ?? 0;
-    const cy = self.document?.y ?? self.y ?? 0;
+    const selfPlaceable = selfToken.object || (canvas.tokens?.get(selfToken.id)?.object) || null;
+    if(!selfPlaceable) return enemyTokens;
+    /* Use token center, not top-left corner */
+    const origin = {
+      x: selfPlaceable.center?.x ?? (selfPlaceable.document?.x ?? 0) + ((selfPlaceable.w ?? selfPlaceable.document?.width ?? 1) * (canvas.grid.size || 100) / 2),
+      y: selfPlaceable.center?.y ?? (selfPlaceable.document?.y ?? 0) + ((selfPlaceable.h ?? selfPlaceable.document?.height ?? 1) * (canvas.grid.size || 100) / 2)
+    };
     return enemyTokens.filter(t => {
-      const tx = t.document?.x ?? t.x ?? 0, ty = t.document?.y ?? t.y ?? 0;
-      /* Wall LOS check via geometry-level collision */
+      const tPlaceable = t.object || (canvas.tokens?.get(t.id)?.object) || t;
+      const tx = tPlaceable.center?.x ?? (t.document?.x ?? t.x ?? 0) + ((t.document?.width ?? 1) * (canvas.grid.size || 100) / 2);
+      const ty = tPlaceable.center?.y ?? (t.document?.y ?? t.y ?? 0) + ((t.document?.height ?? 1) * (canvas.grid.size || 100) / 2);
+      /* Wall LOS check via polygon-based sight collision */
       try {
-        const ray = new foundry.canvas.geometry.Ray(
-          {x: cx, y: cy},
-          {x: tx, y: ty}
-        );
-        if(canvas.walls.checkCollision?.(ray, {type: 'sight', mode: 'any'})) return false;
-      } catch(e) { /* if Ray fails, assume visible */ }
+        const hit = CONFIG.Canvas.polygonBackends?.sight?.testCollision
+          ? CONFIG.Canvas.polygonBackends.sight.testCollision(origin, {x: tx, y: ty}, {type:'sight', mode:'any'})
+          : canvas.walls?.checkCollision?.(new foundry.canvas.geometry.Ray(origin, {x: tx, y: ty}), {type: 'sight', mode: 'any'});
+        if(hit) return false;
+      } catch(e) { /* if check fails, assume visible */ }
       return true;
     });
   }
