@@ -1,7 +1,7 @@
 const MODULE_ID = 'ai-companion';
 
 /* ═══════════════════════════════════════════════════════════════════
-   NPC AUTOPILOT v3.10.5 — Foundry VTT D&D 5e
+   NPC AUTOPILOT v3.10.7 — Foundry VTT D&D 5e
    Unified attack path: always use activity.rollAttack with target AC
    injected up-front so dnd5e hit/miss cards render correctly.
    Soft dependency — safe without.
@@ -1312,9 +1312,11 @@ ${moveRes.msg}`, actor); await this._stepDelay(); }
     const hit=CONFIG.Canvas.polygonBackends?.move?.testCollision?CONFIG.Canvas.polygonBackends.move.testCollision({x:self.x,y:self.y}, snapped, {type:'move',mode:'any'}):false;
 
     if(hit && game.settings.get(MODULE_ID, 'npcPathfinding')){
-      const waypoints = this._getPathwaypoints({x:self.x,y:self.y}, {x:snapped.x,y:snapped.y});
+      /* Use actual target center (always valid) for waypoint generation, not snapped (may be behind wall) */
+      const targetCenter = {x: target.x + (target.width || 1) * gridPx / 2, y: target.y + (target.height || 1) * gridPx / 2};
+      const waypoints = this._getPathwaypoints({x:self.x,y:self.y}, targetCenter);
       if(waypoints?.length){
-        const pfResult = await this._moveAlongPath(selfToken, waypoints, maxMovePx, gridPx, gridDist);
+        const pfResult = await this._moveAlongPath(selfToken, waypoints, targetCenter, maxMovePx, gridPx, gridDist);
         if(pfResult.movedFt > 0){
           const pfMsg = opts.fromMemory
             ? selfToken.name + ' investigates.'
@@ -1360,7 +1362,7 @@ ${moveRes.msg}`, actor); await this._stepDelay(); }
       if(game.settings.get(MODULE_ID, 'npcPathfinding')){
         const waypoints = this._getPathwaypoints({x:self.x,y:self.y}, {x:snapped.x,y:snapped.y});
         if(waypoints?.length){
-          const pfResult = await this._moveAlongPath(selfToken, waypoints, maxPx, gridPx, gd);
+          const pfResult = await this._moveAlongPath(selfToken, waypoints, null, maxPx, gridPx, gd);
           if(pfResult.movedFt > 0) return {msg:`${selfToken.name} retreats around obstacles.`, movedFt: pfResult.movedFt};
         }
       }
@@ -1419,23 +1421,18 @@ ${moveRes.msg}`, actor); await this._stepDelay(); }
   /* Find a waypoint around a wall by testing points along a perpendicular offset */
   static _getPathwaypoints(from, to){
     const gridSize = canvas.grid.size || 100;
-    /* Try multiple offsets in both directions from the direct path */
     const dx = to.x - from.x, dy = to.y - from.y;
     const dist = Math.hypot(dx, dy) || 1;
     const nx = -dy / dist, ny = dx / dist; /* perpendicular unit vector */
-    const offsets = [1.5, 2.5, 4, 6, 8, 10].map(m => m * gridSize);
+    /* Generate waypoints at varying perpendicular offsets at multiple positions along the path */
+    const offsets = [1.5, 2.5, 4, 6, 8, 10, 12].map(m => m * gridSize);
     const candidates = [];
     for(const off of offsets){
-      const mid = {x: (from.x + to.x) / 2, y: (from.y + to.y) / 2};
-      candidates.push({x: mid.x + nx * off, y: mid.y + ny * off});
-      candidates.push({x: mid.x - nx * off, y: mid.y - ny * off});
-      /* Also try near the start and end points */
-      const nearStart = {x: from.x + dx * 0.25, y: from.y + dy * 0.25};
-      candidates.push({x: nearStart.x + nx * off, y: nearStart.y + ny * off});
-      candidates.push({x: nearStart.x - nx * off, y: nearStart.y - ny * off});
-      const nearEnd = {x: from.x + dx * 0.75, y: from.y + dy * 0.75};
-      candidates.push({x: nearEnd.x + nx * off, y: nearEnd.y + ny * off});
-      candidates.push({x: nearEnd.x - nx * off, y: nearEnd.y - ny * off});
+      for(const frac of [0.1, 0.25, 0.5, 0.75]){ /* near start, quarter, midpoint, three-quarter */
+        const pt = {x: from.x + dx * frac, y: from.y + dy * frac};
+        candidates.push({x: pt.x + nx * off, y: pt.y + ny * off});
+        candidates.push({x: pt.x - nx * off, y: pt.y - ny * off});
+      }
     }
     const waypoints = [];
     const tested = new Set();
@@ -1451,23 +1448,24 @@ ${moveRes.msg}`, actor); await this._stepDelay(); }
       if(hit2) continue;
       waypoints.push(pt);
     }
-    /* Sort by total distance from + to */
+    /* Sort by total distance from + to, return top 3 for chaining */
     waypoints.sort((a,b) => {
       const da = Math.hypot(a.x-from.x, a.y-from.y) + Math.hypot(to.x-a.x, to.y-a.y);
       const db = Math.hypot(b.x-from.x, b.y-from.y) + Math.hypot(to.x-b.x, to.y-b.y);
       return da - db;
     });
-    return waypoints.slice(0, 1);
+    return waypoints.slice(0, 3);
   }
 
-  static async _moveAlongPath(selfToken, waypoints, maxMovePx, gridPx, gridDist){
+  static async _moveAlongPath(selfToken, waypoints, finalDest, maxMovePx, gridPx, gridDist){
     let totalMovedFt = 0;
     let cur = {x: selfToken.x || selfToken.document?.x || 0, y: selfToken.y || selfToken.document?.y || 0};
+    this._log(`_moveAlongPath: ${waypoints.length} wps, max=${Math.round(maxMovePx)}px`);
     for(const wp of waypoints){
       const segDist = Math.hypot(wp.x - cur.x, wp.y - cur.y);
       if(segDist > maxMovePx) break;
       const hit = CONFIG.Canvas.polygonBackends?.move?.testCollision ? CONFIG.Canvas.polygonBackends.move.testCollision(cur, wp, {type:'move',mode:'any'}) : false;
-      if(hit) continue;
+      if(hit){ this._log(`_moveAlongPath: wp blocked (${Math.round(wp.x)},${Math.round(wp.y)})`); continue; }
       const snapped = canvas.grid.getSnappedPoint ? canvas.grid.getSnappedPoint({x:wp.x,y:wp.y},{mode:CONST.GRID_SNAPPING_MODES.CENTER}) : wp;
       await this._safeUpdate(selfToken, {x:snapped.x,y:snapped.y});
       const movedFt = Math.round((segDist / gridPx) * gridDist);
@@ -1475,6 +1473,20 @@ ${moveRes.msg}`, actor); await this._stepDelay(); }
       maxMovePx -= segDist;
       cur = snapped;
     }
+    /* Final segment to destination, if movement remains and waypoints got us past the wall */
+    if(finalDest && maxMovePx > 0){
+      const lastDist = Math.hypot(finalDest.x - cur.x, finalDest.y - cur.y);
+      if(lastDist < maxMovePx * 3){ /* only if we're close-ish */
+        const hit = CONFIG.Canvas.polygonBackends?.move?.testCollision ? CONFIG.Canvas.polygonBackends.move.testCollision(cur, finalDest, {type:'move',mode:'any'}) : false;
+        if(!hit && lastDist > 0){
+          const snapped = canvas.grid.getSnappedPoint ? canvas.grid.getSnappedPoint({x:finalDest.x,y:finalDest.y},{mode:CONST.GRID_SNAPPING_MODES.CENTER}) : finalDest;
+          await this._safeUpdate(selfToken, {x:snapped.x,y:snapped.y});
+          const movedFt = Math.round((lastDist / gridPx) * gridDist);
+          totalMovedFt += movedFt;
+        }
+      }
+    }
+    this._log(`_moveAlongPath: moved ${totalMovedFt}ft total`);
     return {movedFt: totalMovedFt};
   }
 
