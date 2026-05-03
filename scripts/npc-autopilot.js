@@ -1,7 +1,7 @@
 const MODULE_ID = 'ai-companion';
 
 /* ═══════════════════════════════════════════════════════════════════
-   NPC AUTOPILOT v3.9.2 — Foundry VTT D&D 5e
+   NPC AUTOPILOT v3.9.3 — Foundry VTT D&D 5e
    Unified attack path: always use activity.rollAttack with target AC
    injected up-front so dnd5e hit/miss cards render correctly.
    Soft dependency — safe without.
@@ -1444,29 +1444,18 @@ ${moveRes.msg}`, actor); await this._stepDelay(); }
   static _visibleEnemies(selfToken, enemyTokens){
     if(!canvas?.walls || !canvas?.scene) return enemyTokens;
     const self = selfToken.object || selfToken;
-    const origin = {x: self.document?.x || self.x, y: self.document?.y || self.y};
-    const visionMode = canvas.vision?.mode;
-    const sightAngle = canvas.sight?.angle ?? 360;
-    const sightRange = self.document?.sight?.range ?? 0;
+    const cx = self.document?.x ?? self.x ?? 0;
+    const cy = self.document?.y ?? self.y ?? 0;
     return enemyTokens.filter(t => {
-      const tx = t.document?.x || t.x, ty = t.document?.y || t.y;
-      /* Angle check for 90°/180° cone vision (e.g. darkvision with limited arc) */
-      if(sightAngle < 360){
-        const angle = Math.atan2(ty - origin.y, tx - origin.x) * (180 / Math.PI);
-        const facing = self.document?.rotation ?? 0;
-        let diff = angle - facing;
-        while(diff < -180) diff += 360;
-        while(diff > 180) diff -= 360;
-        if(Math.abs(diff) > sightAngle / 2) return false;
-      }
-      /* Range check */
-      if(sightRange > 0){
-        const dx = tx - origin.x, dy = ty - origin.y;
-        const dist = Math.sqrt(dx*dx + dy*dy) / (canvas.grid.size || 1) * (canvas.grid.distance || 5);
-        if(dist > sightRange) return false;
-      }
-      /* Wall LOS check */
-      if(!canvas.walls.canSee(origin, {x: tx, y: ty})) return false;
+      const tx = t.document?.x ?? t.x ?? 0, ty = t.document?.y ?? t.y ?? 0;
+      /* Wall LOS check via geometry-level collision */
+      try {
+        const ray = new Ray(
+          {x: cx, y: cy},
+          {x: tx, y: ty}
+        );
+        if(canvas.walls.checkCollision?.(ray, {type: 'sight', mode: 'any'})) return false;
+      } catch(e) { /* if Ray fails, assume visible */ }
       return true;
     });
   }

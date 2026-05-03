@@ -1,8 +1,8 @@
 {
   "id": "ai-companion",
   "title": "NPC Autopilot",
-  "description": "Foundry VTT NPC combat autopilot for D&D 5e. v3.9.2: fix missing _visibleEnemies/_rememberPosition/_getLastKnownPosition methods. v3.9.1: fix unregistered settings crash. v3.9.0: NPC Vision (LOS), door detection, pathfinding.",
-  "version": "3.9.2",
+  "description": "Foundry VTT NPC combat autopilot for D&D 5e. v3.9.3: fix wall LOS blocking via checkCollision (replaced broken canSee). v3.9.2: add missing vision methods. v3.9.1: register new settings. v3.9.0: NPC Vision (LOS), door detection, pathfinding.",
+  "version": "3.9.3",
   "authors": [
     {
       "name": "Steve"
