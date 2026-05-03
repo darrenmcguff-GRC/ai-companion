@@ -1,8 +1,8 @@
 {
   "id": "ai-companion",
   "title": "NPC Autopilot",
-  "description": "Foundry VTT NPC combat autopilot for D&D 5e. v3.10.6: pathfinding fix \u2014 waypoints generated against actual target center not interim snapped point; 3 waypoints returned for chaining; final destination approach. V14 verified.",
-  "version": "3.10.7",
+  "description": "Foundry VTT NPC combat autopilot for D&D 5e. v3.10.9: per-NPC last-known positions (keyed by observer:target). Bandit A's memory isn't shared with Bandit B. V14 verified.",
+  "version": "3.10.10",
   "authors": [
     {
       "name": "Steve"

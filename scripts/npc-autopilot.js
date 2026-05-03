@@ -1,7 +1,7 @@
 const MODULE_ID = 'ai-companion';
 
 /* ═══════════════════════════════════════════════════════════════════
-   NPC AUTOPILOT v3.10.7 — Foundry VTT D&D 5e
+   NPC AUTOPILOT v3.10.10 — Foundry VTT D&D 5e
    Unified attack path: always use activity.rollAttack with target AC
    injected up-front so dnd5e hit/miss cards render correctly.
    Soft dependency — safe without.
@@ -303,7 +303,7 @@ class NpcAutopilot {
           .map(t => ({token: t, dist: this._tokenDistanceFt(tokenDoc, t)}))
           .sort((a,b) => a.dist - b.dist);
         for(const e of nearest){
-          const lkp = this._getLastKnownPosition(e.token.id);
+          const lkp = this._getLastKnownPosition(tokenDoc.id || tokenDoc._id, e.token.id);
           if(lkp){
             targetToken = e.token;
             isTargetFromMemory = true;
@@ -326,7 +326,11 @@ class NpcAutopilot {
       if(targetToken) this._incrementTargetCount(targetToken);
 
       /* personality intro */
-      await this._say(`🎯 ${this._personalityLine(actor, 'targetSelect', {target: targetToken?.name})}`, actor);
+      if(targetToken){
+        await this._say(`🎯 ${this._personalityLine(actor, 'targetSelect', {target: targetToken.name})}`, actor);
+      } else {
+        await this._say(`🔍 ${actor.name} searches — no target located.`, actor);
+      }
       /* AI narration on target lock */
       await this._ollamaNarrateTarget(actor, targetToken, tactics, enemyTokens.length, allyTokens.length);
       this._ollamaLogEvent(`${actor.name} targets ${targetToken?.name}`);
@@ -1576,15 +1580,16 @@ ${moveRes.msg}`, actor); await this._stepDelay(); }
   }
 
   static _rememberPosition(selfToken, targetToken){
+    const sx = selfToken.document?.id || selfToken.id;
     const tx = targetToken.document?.x || targetToken.x;
     const ty = targetToken.document?.y || targetToken.y;
     const id = targetToken.document?.id || targetToken.id;
-    if(!id) return;
-    this._lastKnownPositions.set(id, {x: tx, y: ty, scene: canvas.scene?.id, round: game.combat?.round || 0});
+    if(!id || !sx) return;
+    this._lastKnownPositions.set(sx + ':' + id, {x: tx, y: ty, scene: canvas.scene?.id, round: game.combat?.round || 0});
   }
 
-  static _getLastKnownPosition(tokenId){
-    const pos = this._lastKnownPositions.get(tokenId);
+  static _getLastKnownPosition(observerTokenId, tokenId){
+    const pos = this._lastKnownPositions.get(observerTokenId + ':' + tokenId);
     if(!pos) return null;
     /* Purge positions from old scenes */
     if(pos.scene !== canvas.scene?.id) return null;
