@@ -1,7 +1,7 @@
 const MODULE_ID = 'ai-companion';
 
 /* ═══════════════════════════════════════════════════════════════════
-   NPC AUTOPILOT v3.9.7 — Foundry VTT D&D 5e
+   NPC AUTOPILOT v3.9.9 — Foundry VTT D&D 5e
    Unified attack path: always use activity.rollAttack with target AC
    injected up-front so dnd5e hit/miss cards render correctly.
    Soft dependency — safe without.
@@ -306,9 +306,8 @@ class NpcAutopilot {
           }
         }
         if(!targetToken){
-          targetToken = this._pickTarget(enemyTokens, tokenDoc, actor, tactics);
-          isTargetFromMemory = true;
-          this._log('no memory either; raw-picking ' + (targetToken?.name || ''));
+          this._log('no memory either; 0 visible — skipping');
+          targetToken = null;
         }
       } else {
         targetToken = enemyTokens.length ? this._pickTarget(enemyTokens, tokenDoc, actor, tactics) : null;
@@ -1533,8 +1532,8 @@ ${moveRes.msg}`, actor); await this._stepDelay(); }
       const tx = (tDoc.x ?? 0) + ((tDoc.width ?? 1) * gs) / 2;
       const ty = (tDoc.y ?? 0) + ((tDoc.height ?? 1) * gs) / 2;
       try {
-        const ray = new foundry.canvas.geometry.Ray({x: sx, y: sy}, {x: tx, y: ty});
-        const blocked = canvas.walls.checkCollision(ray, {type: 'sight', mode: 'any'});
+        const sightPoly = CONFIG.Canvas.polygonBackends.sight;
+        const blocked = !sightPoly ? false : sightPoly.testCollision({x: sx, y: sy}, {x: tx, y: ty}, {mode: 'any', type: 'sight'});
         if(blocked){
           this._log(`_visibleEnemies: ${tDoc?.name||'?'} BLOCKED`);
           continue;
@@ -1840,8 +1839,8 @@ ${moveRes.msg}`, actor); await this._stepDelay(); }
     if (scene?.name) terrain.push(`in ${scene.name}`);
     if (aToken && target) {
       try {
-        const ray = new foundry.canvas.geometry.Ray(aToken.center, target.center || aToken.center);
-        const hasWall = canvas.walls?.checkCollision?.(ray, { type: 'sight', mode: 'any' });
+        const sightPoly = CONFIG.Canvas.polygonBackends?.sight;
+        const hasWall = !sightPoly ? false : sightPoly.testCollision(aToken.center, target.center || aToken.center, { mode: 'any', type: 'sight' });
         terrain.push(hasWall ? 'obscured sightline' : 'clear sightline');
       } catch(e) { /* skip wall check */ }
     }
